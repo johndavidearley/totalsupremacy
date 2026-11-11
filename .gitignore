@@ -1,0 +1,15 @@
+build/
+cmake-build-*/
+.venv/
+__pycache__/
+*.egg-info/
+CMakeCache.txt
+CMakeFiles/
+Testing/
+*.o
+*.a
+*.dylib
+*.so
+*.dll
+*.exe
+.DS_Store

@@ -1,0 +1,142 @@
+#version 450
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Grid {
+    int grid[];
+};
+layout(set = 0, binding = 1, std430) readonly buffer Queries {
+    ivec2 queries[];
+};
+layout(set = 0, binding = 2, std430) buffer Work {
+    int work[];
+};
+layout(set = 0, binding = 3, std430) buffer Results {
+    int results[];
+};
+layout(push_constant) uniform Parameters {
+    int count;
+} parameters;
+
+const int columns = 100;
+const int rows = 70;
+const int nodes = columns * rows;
+const int stride = 10;
+const int infinity = 2147483647;
+const ivec2 neighbors[8] = ivec2[8](
+    ivec2(-1, -1), ivec2(0, -1), ivec2(1, -1), ivec2(-1, 0),
+    ivec2(1, 0), ivec2(-1, 1), ivec2(0, 1), ivec2(1, 1));
+
+int heuristic(int node, int goal) {
+    int dx = abs(node % columns - goal % columns);
+    int dy = abs(node / columns - goal / columns);
+    int diagonal = min(dx, dy);
+    float elevation = intBitsToFloat(grid[node * stride + 1]);
+    float goalElevation = intBitsToFloat(grid[goal * stride + 1]);
+    return diagonal * 1414 + (max(dx, dy) - diagonal) * 1000 +
+           int(abs(elevation - goalElevation) * 50.0);
+}
+
+bool precedes(int base, int left, int right, int goal) {
+    int leftCost = work[base + left];
+    int rightCost = work[base + right];
+    int leftTotal = leftCost + heuristic(left, goal);
+    int rightTotal = rightCost + heuristic(right, goal);
+    if (leftTotal != rightTotal) return leftTotal < rightTotal;
+    if (leftCost != rightCost) return leftCost > rightCost;
+    return left < right;
+}
+
+void swapHeap(int base, int a, int b) {
+    int left = work[base + 3 * nodes + a];
+    int right = work[base + 3 * nodes + b];
+    work[base + 3 * nodes + a] = right;
+    work[base + 3 * nodes + b] = left;
+    work[base + 2 * nodes + left] = b;
+    work[base + 2 * nodes + right] = a;
+}
+
+void siftUp(int base, int position, int goal) {
+    while (position > 0) {
+        int parent = (position - 1) / 2;
+        if (!precedes(base, work[base + 3 * nodes + position],
+                      work[base + 3 * nodes + parent], goal)) break;
+        swapHeap(base, position, parent);
+        position = parent;
+    }
+}
+
+void main() {
+    int query = int(gl_GlobalInvocationID.x);
+    if (query >= parameters.count) return;
+    int start = queries[query].x;
+    int goal = queries[query].y;
+    results[query] = -1;
+    if (start < 0 || start >= nodes || goal < 0 || goal >= nodes) return;
+
+    int base = query * nodes * 4;
+    for (int i = 0; i < nodes; ++i) {
+        work[base + i] = infinity;
+        work[base + nodes + i] = -1;
+        work[base + 2 * nodes + i] = -1;
+    }
+    work[base + start] = 0;
+    work[base + 2 * nodes + start] = 0;
+    work[base + 3 * nodes] = start;
+    int heapSize = 1;
+    while (heapSize > 0) {
+        int current = work[base + 3 * nodes];
+        int cost = work[base + current];
+        --heapSize;
+        if (heapSize > 0) {
+            int replacement = work[base + 3 * nodes + heapSize];
+            work[base + 3 * nodes] = replacement;
+            work[base + 2 * nodes + replacement] = 0;
+            int position = 0;
+            while (true) {
+                int left = position * 2 + 1;
+                if (left >= heapSize) break;
+                int best = left;
+                int right = left + 1;
+                if (right < heapSize &&
+                    precedes(base, work[base + 3 * nodes + right],
+                             work[base + 3 * nodes + left], goal)) best = right;
+                if (!precedes(base, work[base + 3 * nodes + best],
+                              work[base + 3 * nodes + position], goal)) break;
+                swapHeap(base, position, best);
+                position = best;
+            }
+        }
+        work[base + 2 * nodes + current] = -2;
+        if (current == goal) {
+            results[query] = cost;
+            return;
+        }
+        ivec2 currentPosition = ivec2(current % columns, current / columns);
+        for (int direction = 0; direction < 8; ++direction) {
+            ivec2 nextPosition = currentPosition + neighbors[direction];
+            if (nextPosition.x < 0 || nextPosition.x >= columns ||
+                nextPosition.y < 0 || nextPosition.y >= rows) continue;
+            int next = nextPosition.y * columns + nextPosition.x;
+            if (grid[next * stride] != 0 ||
+                work[base + 2 * nodes + next] == -2) continue;
+            if (neighbors[direction].x != 0 && neighbors[direction].y != 0) {
+                int horizontal = currentPosition.y * columns + nextPosition.x;
+                int vertical = nextPosition.y * columns + currentPosition.x;
+                if ((horizontal != start && grid[horizontal * stride] != 0) ||
+                    (vertical != start && grid[vertical * stride] != 0)) continue;
+            }
+            int newCost = cost + grid[current * stride + 2 + direction];
+            if (newCost >= work[base + next]) continue;
+            work[base + next] = newCost;
+            work[base + nodes + next] = current;
+            int position = work[base + 2 * nodes + next];
+            if (position == -1) {
+                position = heapSize++;
+                work[base + 3 * nodes + position] = next;
+                work[base + 2 * nodes + next] = position;
+            }
+            siftUp(base, position, goal);
+        }
+    }
+}
