@@ -130,17 +130,18 @@ void updateTitle(GLFWwindow* window, const rts::Simulation& simulation,
     glfwSetWindowTitle(window, title.c_str());
 }
 
-bool mouseToDrawable(GLFWwindow* window, double x, double y, float& drawableX,
-                     float& drawableY, int& width, int& height) {
+bool mouseToDrawable(GLFWwindow* window, double x, double y,
+                     int drawableWidth, int drawableHeight,
+                     float& drawableX, float& drawableY) {
     int windowWidth = 0;
     int windowHeight = 0;
-    glfwGetFramebufferSize(window, &width, &height);
     glfwGetWindowSize(window, &windowWidth, &windowHeight);
-    if (width <= 0 || height <= 0 || windowWidth <= 0 || windowHeight <= 0) {
+    if (drawableWidth <= 0 || drawableHeight <= 0 ||
+        windowWidth <= 0 || windowHeight <= 0) {
         return false;
     }
-    drawableX = static_cast<float>(x * width / windowWidth);
-    drawableY = static_cast<float>(y * height / windowHeight);
+    drawableX = static_cast<float>(x * drawableWidth / windowWidth);
+    drawableY = static_cast<float>(y * drawableHeight / windowHeight);
     return true;
 }
 
@@ -210,11 +211,10 @@ int run(const Options& options) {
     rts::Camera3D camera;
     camera.setViewport(1440.0F, 900.0F);
     resetCamera(camera);
-    if (desktop.window != nullptr) {
+    if (renderer != nullptr) {
         int width = 0;
         int height = 0;
-        glfwGetFramebufferSize(desktop.window, &width, &height);
-        if (width > 0 && height > 0) {
+        if (renderer->drawableSize(width, height)) {
             camera.setViewport(static_cast<float>(width), static_cast<float>(height));
             resetCamera(camera);
         }
@@ -306,18 +306,16 @@ int run(const Options& options) {
 
             int width = 0;
             int height = 0;
-            glfwGetFramebufferSize(desktop.window, &width, &height);
-            if (width != previousFramebufferWidth ||
-                height != previousFramebufferHeight) {
+            if (renderer->drawableSize(width, height) &&
+                (width != previousFramebufferWidth ||
+                 height != previousFramebufferHeight)) {
                 const auto focus = camera.ground(camera.centerX, camera.centerY);
                 previousFramebufferWidth = width;
                 previousFramebufferHeight = height;
-                if (width > 0 && height > 0) {
-                    camera.setViewport(static_cast<float>(width),
-                                       static_cast<float>(height));
-                    if (focus.valid) {
-                        camera.focusAt(focus.x, focus.z);
-                    }
+                camera.setViewport(static_cast<float>(width),
+                                   static_cast<float>(height));
+                if (focus.valid) {
+                    camera.focusAt(focus.x, focus.z);
                 }
             }
 
@@ -326,10 +324,9 @@ int run(const Options& options) {
             glfwGetCursorPos(desktop.window, &cursorX, &cursorY);
             float x = 0.0F;
             float y = 0.0F;
-            int drawableWidth = 0;
-            int drawableHeight = 0;
-            if (mouseToDrawable(desktop.window, cursorX, cursorY, x, y,
-                                drawableWidth, drawableHeight)) {
+            if (renderer->drawableSize(width, height) &&
+                mouseToDrawable(desktop.window, cursorX, cursorY, width, height,
+                                x, y)) {
                 const int leftButton = glfwGetMouseButton(
                     desktop.window, GLFW_MOUSE_BUTTON_LEFT);
                 const int rightButton = glfwGetMouseButton(
@@ -438,7 +435,10 @@ int run(const Options& options) {
             if (keyDown(GLFW_KEY_S) || keyDown(GLFW_KEY_DOWN)) camera.pan(0.0F, -panSpeed);
         }
 
-        if (paused) {
+        // MCP sessions match a deterministic playtest: the wall clock never
+        // steps the simulation, including while the pause flag is clear.
+        // Explicit advance is the only clock. Interactive play keeps it.
+        if (paused || options.mcpControl) {
             accumulator = 0.0;
         } else {
             while (accumulator >= rts::Simulation::kFixedStepSeconds) {

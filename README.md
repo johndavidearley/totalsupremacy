@@ -68,8 +68,9 @@ Details and the existing macOS baseline are in
 The desktop application renders a geometric 3D battlefield and 1,000 units,
 with a smoothly elevated, depth-tested terrain heightfield and unit geometry,
 camera orbit/pan/anchored zoom, orthographic and perspective views, unit
-selection, and move orders. A* routes account for elevation changes, with
-Dijkstra available for benchmark comparison. Simulation updates run at a fixed
+selection, and move orders. Group move orders share one elevation-aware flow
+field and keep formation slots. One-unit orders use A*, and Dijkstra remains
+available for benchmark comparison. Simulation updates run at a fixed
 30 Hz. The window title reports unit/selection counts,
 tick count, frame rate, and recent average/maximum tick duration. This remains
 an initial playable engineering slice, not a complete RTS.
@@ -85,8 +86,10 @@ pauses/resumes; Home resets the camera; Escape exits.
 
 The local MCP server uses stdio and launches the desktop game when
 `launch_game` is called. It can also use `--headless` for automated sessions.
-The simulation starts paused for MCP sessions; `advance_ticks` provides exact
-fixed-step progression.
+The simulation starts paused for MCP sessions. While that bridge is attached,
+the wall clock does not step the simulation; `advance_ticks` is the only
+clock and still requires the pause flag. Interactive play without the bridge
+steps from the wall clock when unpaused.
 
 ```sh
 python3.10 -m venv .venv
@@ -102,10 +105,26 @@ In an MCP client configuration, register a stdio server with command
 `/absolute/path/to/.venv/bin/total-supremacy-mcp` and argument
 `--game-executable /absolute/path/to/build/TotalSupremacy`. The tools launch
 and stop the game, inspect paginated unit state, select one or multiple units,
-issue move orders, inspect routing feedback, pause/resume, advance exact ticks,
-and set the 3D camera. No network
+issue move and attack orders, assign teams, inspect routing feedback,
+pause/resume, advance exact ticks, and set the 3D camera. The `state` result includes `state_hash`, the decimal
+FNV-1a 64-bit hash of authoritative gameplay. Camera pose and the pause flag
+are not part of that hash. No network
 listener is opened. Use `--headless` as an additional server argument for
 automation that does not need a visible window.
+
+Automated playtests replay a JSON scenario against a fresh paused game. Steps
+are commands or assertions (`eq`, `count`, `lt`, `le`, `gt`, `ge`) on dotted
+state fields. `--repeats 2` runs the scenario twice and compares a canonical
+hash of the final state. Each run keeps `run.json`, `actions.jsonl`,
+`game.log`, `scenario.json`, `canonical.json`, and `replay.json`.
+
+```sh
+PYTHONPATH=tools/mcp/src python3 -m totalsupremacy_mcp.scenarios \
+  tools/mcp/examples/smoke.json \
+  --executable "$PWD/build/TotalSupremacy" \
+  --artifacts playtest-artifacts \
+  --repeats 2
+```
 
 For example, the VS Code MCP entry is:
 

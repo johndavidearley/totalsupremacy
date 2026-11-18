@@ -12,7 +12,8 @@ This is a forward-looking sequence, not a claim that the listed features exist.
 - [x] Multi-unit command feedback and terrain-aware waypoint routing.
 - [x] Deterministic terrain heightfield, elevation-aware grid costs, and
   A*/Dijkstra path-cost comparison.
-- [ ] Formation-level pathfinding.
+- [x] Formation-level pathfinding. Group orders share one flow field and keep
+  per-unit formation slots. One-unit orders stay on A*.
 - [ ] Build/test verification on Windows and Linux; only macOS validated locally.
 
 ## Phase 2 — Tactical simulation
@@ -31,8 +32,9 @@ This is a forward-looking sequence, not a claim that the listed features exist.
 ## Phase 4 — Scale and multiplayer foundations
 
 - Profile before introducing parallel simulation work.
-- Define deterministic command and state-hash formats.
-- Evaluate lockstep networking and replay/desync diagnostics.
+- [x] Define deterministic command and state-hash formats.
+- [x] Evaluate lockstep networking and replay/desync diagnostics. The check
+  is local. No peer session is implemented.
 - Add performance budgets from repeatable measurements.
 
 ## Phase 5 — Production direction
@@ -42,5 +44,15 @@ This is a forward-looking sequence, not a claim that the listed features exist.
 - Add authoring tools, data-driven unit definitions, scenarios, and mod support.
 - Expand platform CI and release packaging.
 
-The headless scale benchmark is available; next, profile route-planning cost
-and set performance budgets from representative target hardware.
+Group orders now use the shared flow field measured in `docs/PERFORMANCE.md`.
+Elevation cost and the western ridge are tuned so routes take the pass
+instead of the crest. The local GPU render-pass p95 spike was a per-frame
+swapchain rebuild, not the pass itself. Movement, path construction, and
+elevation costs use integer arithmetic.
+The simulation records a caller-facing command log and an FNV-1a state hash;
+replaying the log reproduces the hash. Two logs can be compared locally at
+the first differing command. A selected unit can attack an enemy team inside
+40 world units; dead units stay in the vector. There is still one archetype
+and no chase order. Multiplayer is not implemented. Next, set performance
+budgets from representative target hardware. The local measurements are not
+yet budgets. Windows and Linux builds are still unvalidated.

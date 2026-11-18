@@ -33,8 +33,11 @@ int heuristic(int node, int goal) {
     int diagonal = min(dx, dy);
     float elevation = intBitsToFloat(grid[node * stride + 1]);
     float goalElevation = intBitsToFloat(grid[goal * stride + 1]);
+    // Scale must match Simulation::kElevationCostPerHeightUnit. The host
+    // uploads the float view of its milli-heights. Edge costs are the host's
+    // precomputed transitions.
     return diagonal * 1414 + (max(dx, dy) - diagonal) * 1000 +
-           int(abs(elevation - goalElevation) * 50.0);
+           int(abs(elevation - goalElevation) * 180.0);
 }
 
 bool precedes(int base, int left, int right, int goal) {

@@ -34,6 +34,9 @@ inline void selectAtScreen(Simulation& simulation, const Camera3D& camera,
     const Unit* nearest = nullptr;
 
     for (const auto& unit : simulation.units()) {
+        if (!unit.alive) {
+            continue;
+        }
         const float unitHeight = simulation.terrainElevation(unit.position) + 8.5F;
         const WorldPoint world{unit.position.x, unitHeight, unit.position.y};
         const auto point = camera.project(world);
@@ -69,6 +72,9 @@ inline std::size_t selectInScreenRectangle(Simulation& simulation,
     std::vector<std::uint32_t> selectedIds;
 
     for (const auto& unit : simulation.units()) {
+        if (!unit.alive) {
+            continue;
+        }
         const auto point = camera.project({
             unit.position.x,
             simulation.terrainElevation(unit.position) + 8.5F,

@@ -10,13 +10,18 @@ profiling; and a Python FastMCP stdio server controlling the owned game process
 through a queued local bridge. Screen-space drag selection works with both
 camera projections. Multi-unit move feedback is visible in the window and MCP
 state, and units route around shared obstacles and smooth elevation changes
-using deterministic A*.
+using deterministic A*. Group orders of two or more units share one
+elevation-aware Dijkstra flow field rooted at the traversable cell nearest
+the order point. Each unit keeps its formation slot and follows a
+terrain-clear offset of the group's centroid route, falling back to the
+field's merged geodesics or to individual A* if that offset is blocked. A
+one-unit order still uses A*.
 
 ## Validation status
 
 The full Release `-Werror` Vulkan build passes against the installed MacPorts
-GLFW, Vulkan loader/headers, shaderc, and MoltenVK packages; both available
-CTest tests pass. A full-population regression confirms all 1,000 selected
+GLFW, Vulkan loader/headers, shaderc, and MoltenVK packages; the native,
+headless MCP, and MCP server CTest tests pass. A full-population regression confirms all 1,000 selected
 units receive routes, including units whose start cells are conservatively
 blocked. A prior flat-terrain headless order routed all 1,000 units in 0.059
 seconds. The live renderer
@@ -82,18 +87,41 @@ of 32, checks every route cost and destination against CPU A*, and validates
 the returned path before applying it. On the local Intel Iris Plus Graphics
 655, a 1,800-unit far-corner order measured 1,109.699 ms median end-to-end
 versus 84.902 ms for CPU A* over three trials. This prototype remains
-benchmark-only; it does not establish performance of GPU flow fields or other
-GPU implementations.
+benchmark-only. Group gameplay does not use it.
+
+The shared CPU flow field is the group router. Elevation weight is 180 and
+the starter heightfield has a western ridge with a pass at x=560, z=650.
+The lead unit ordered due north takes that pass. On the local Release build
+(Apple Clang 17), a 1,800-unit far-corner order measured 25.600 ms median
+versus 95.830 ms for per-unit A*, with the field expanded once and no
+individual-search fallbacks. Every measured population and scenario routed
+all selected units on formation paths. Full tables are in
+`docs/PERFORMANCE.md`. CTest passes, including the headless MCP control tests.
+
+The live renderer now keeps the swapchain for the whole benchmark. On the
+same Iris Plus 655 at 1440×900, the 1,800-unit 100-selected case measured
+6.407 ms median CPU scene build and 0.745 ms median GPU render pass, with
+GPU p95 at 0.794 ms. The earlier multi-millisecond GPU p95 was a per-frame
+swapchain rebuild. These are local observations, not budgets.
+
+Movement ticks advance in integer milliunits. One tick is 2,400 milliunits
+(2.4 world units). Formation slots, the group centroid, waypoint polylines,
+and segment samples use that same lattice. Elevation samples and edge costs
+use integer milli-heights. On the local Release build, the 1,800-unit
+far-corner order costs 55,682.465 for A* and Dijkstra and 61,844.747 for the
+flow field. The step median is 0.128 ms with p95 0.131 ms and position
+checksum 3353087934. The simulation records a caller-facing command log and
+an FNV-1a 64-bit hash of authoritative gameplay. Replaying that log
+reproduces the hash. `findReplayDivergence` compares two logs on fresh
+simulations and stops at the first command or hash disagreement. One
+infantry attack deals 10 damage per tick inside 40 world units to another
+team, after movement, and a unit at 0 health stays in the vector. The state
+hash format is version 2. Multiplayer is not implemented.
 
 ## Next steps
 
-1. Evaluate whether shared flow fields or other group-routing approaches are
-   appropriate for formations before further GPU optimization.
-2. Tune elevation cost and terrain shape against desired gameplay, then
-   re-profile pathfinding at large unit counts.
-3. Re-run the route and live renderer benchmarks on target hardware and add
-   fixed budgets after representative measurements.
-4. Investigate GPU render-pass p95 spikes before choosing a rendering
-   optimization.
-5. Revisit movement representation and deterministic arithmetic before replay
-   or multiplayer work.
+1. Re-run the route and live renderer benchmarks on target hardware and add
+   fixed budgets after representative measurements. The local 1,800-unit
+   far-corner group order is 25.600 ms median, and the local 1,800-unit
+   selected scene build is 6.407 ms median. Neither is a budget.
+2. Build and test on Windows and Linux. Only macOS has been validated.

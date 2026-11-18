@@ -463,7 +463,7 @@ void runCase(GpuPathBackend& backend, std::size_t population,
             throw std::runtime_error("Unable to select benchmark units.");
         }
         const auto cpuStart = Clock::now();
-        cpu.moveSelected(destination);
+        cpu.moveSelected(destination, rts::PathfindingAlgorithm::AStar);
         const auto cpuEnd = Clock::now();
         const auto gpuStart = Clock::now();
         gpu.moveSelected(destination, backend);
@@ -495,7 +495,7 @@ void runCase(GpuPathBackend& backend, std::size_t population,
             if (!reference.selectUnit(ids[i])) {
                 throw std::runtime_error("Unable to select reference unit.");
             }
-            reference.moveSelected(target);
+            reference.moveSelected(target, rts::PathfindingAlgorithm::AStar);
             if (reference.lastMoveCommand().unitsRouted != 1 ||
                 reference.lastPathfindingMetrics().pathCost != backend.lastResults()[i].cost) {
                 throw std::runtime_error("GPU and CPU per-unit route costs differ.");

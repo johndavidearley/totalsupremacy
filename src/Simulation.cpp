@@ -12,7 +12,6 @@
 namespace rts {
 namespace {
 
-constexpr float kElevationCostPerUnit = 50.0F;
 constexpr std::array<std::pair<int, int>, 8> kPathNeighbors{{
     {-1, -1}, {0, -1}, {1, -1}, {-1, 0},
     {1, 0}, {-1, 1}, {0, 1}, {1, 1}
@@ -21,30 +20,242 @@ constexpr std::array<int, 8> kPathGeometricCosts{{
     1414, 1000, 1414, 1000, 1000, 1414, 1000, 1414
 }};
 
-Vec2 formationDestination(Vec2 destination, std::size_t columns,
-                          std::size_t index) {
-    const float center = static_cast<float>(columns - 1) * 0.5F;
+constexpr int kCellMilliunits =
+    static_cast<int>(Simulation::kTerrainCellSize) * Simulation::kWorldMilliunits;
+constexpr std::int64_t kMapMilliWidth =
+    static_cast<std::int64_t>(Simulation::kMapWidth) * Simulation::kWorldMilliunits;
+constexpr std::int64_t kMapMilliHeight =
+    static_cast<std::int64_t>(Simulation::kMapHeight) * Simulation::kWorldMilliunits;
+
+struct MilliPoint {
+    std::int32_t x = 0;
+    std::int32_t y = 0;
+};
+
+MilliPoint toMilli(Vec2 position) {
+    return {Simulation::worldMilliunits(position.x),
+            Simulation::worldMilliunits(position.y)};
+}
+
+Vec2 fromMilli(MilliPoint point) {
+    return {Simulation::worldFromMilliunits(point.x),
+            Simulation::worldFromMilliunits(point.y)};
+}
+
+MilliPoint clampMilli(std::int64_t x, std::int64_t y) {
     return {
-        std::clamp(destination.x +
-                       (static_cast<float>(index % columns) - center) * 14.0F,
-                   0.0F, Simulation::kMapWidth),
-        std::clamp(destination.y +
-                       (static_cast<float>(index / columns) - center) * 14.0F,
-                   0.0F, Simulation::kMapHeight)
+        static_cast<std::int32_t>(std::clamp(x, std::int64_t{0}, kMapMilliWidth)),
+        static_cast<std::int32_t>(std::clamp(y, std::int64_t{0}, kMapMilliHeight))
     };
 }
 
-float generatedTerrainElevation(float x, float z) {
-    const auto hill = [x, z](float centerX, float centerZ, float radiusX,
-                             float radiusZ, float height) {
-        const float dx = (x - centerX) / radiusX;
-        const float dz = (z - centerZ) / radiusZ;
-        return height * std::exp(-0.5F * (dx * dx + dz * dz));
+MilliPoint cellCenterMilli(int index) {
+    const int x = index % Simulation::kTerrainColumns;
+    const int y = index / Simulation::kTerrainColumns;
+    return {
+        static_cast<std::int32_t>((2 * x + 1) * (kCellMilliunits / 2)),
+        static_cast<std::int32_t>((2 * y + 1) * (kCellMilliunits / 2))
     };
-    return 3.0F +
-        hill(700.0F, 470.0F, 240.0F, 190.0F, 27.0F) +
-        hill(1370.0F, 930.0F, 280.0F, 220.0F, 34.0F) +
-        hill(1080.0F, 260.0F, 170.0F, 140.0F, 16.0F);
+}
+
+std::int32_t columnCenterMilli(int column) {
+    return static_cast<std::int32_t>((2 * column + 1) * (kCellMilliunits / 2));
+}
+
+int cellIndexForMilli(MilliPoint position) {
+    const int x = std::clamp(position.x / kCellMilliunits, 0,
+                             Simulation::kTerrainColumns - 1);
+    const int y = std::clamp(position.y / kCellMilliunits, 0,
+                             Simulation::kTerrainRows - 1);
+    return y * Simulation::kTerrainColumns + x;
+}
+
+std::int64_t abs64(std::int64_t value) {
+    return value < 0 ? -value : value;
+}
+
+// Round half away from zero. Distances are non-negative.
+std::uint64_t geometricMilliCost(std::int64_t dx, std::int64_t dy) {
+    const std::int64_t diagonal = std::min(abs64(dx), abs64(dy));
+    const std::int64_t orthogonal = std::max(abs64(dx), abs64(dy)) - diagonal;
+    const std::int64_t numerator = diagonal * 1414 + orthogonal * 1000;
+    return static_cast<std::uint64_t>(
+        (numerator + kCellMilliunits / 2) / kCellMilliunits);
+}
+
+Vec2 formationDestination(Vec2 destination, std::size_t columns,
+                          std::size_t index) {
+    const std::int64_t originX = Simulation::worldMilliunits(destination.x);
+    const std::int64_t originY = Simulation::worldMilliunits(destination.y);
+    const std::int64_t column = static_cast<std::int64_t>(index % columns);
+    const std::int64_t row = static_cast<std::int64_t>(index / columns);
+    const std::int64_t span = static_cast<std::int64_t>(columns - 1);
+    // (column - (columns - 1) / 2) * 14 units, in milliunits.
+    constexpr std::int64_t halfSpacing = 7 * Simulation::kWorldMilliunits;
+    return fromMilli(clampMilli(
+        originX + (2 * column - span) * halfSpacing,
+        originY + (2 * row - span) * halfSpacing));
+}
+
+// Floor of the square root. The double estimate is corrected with integer
+// comparisons so the result does not depend on libm rounding.
+std::int64_t floorSqrt(std::int64_t value) {
+    if (value <= 0) {
+        return 0;
+    }
+    auto estimate = static_cast<std::int64_t>(std::sqrt(static_cast<double>(value)));
+    if (estimate < 0) {
+        estimate = 0;
+    }
+    while (estimate > 0 && estimate > value / estimate) {
+        --estimate;
+    }
+    while (estimate < std::numeric_limits<std::int64_t>::max() &&
+           estimate + 1 <= value / (estimate + 1)) {
+        ++estimate;
+    }
+    return estimate;
+}
+
+// exp(-t) in thousandths. tMilli is thousandths of the exponent. The series
+// and the exp(-1) scale are integer, so the height grid does not call libm.
+std::int32_t expNegMilli(std::int32_t tMilli) {
+    if (tMilli <= 0) {
+        return 1000;
+    }
+    if (tMilli >= 16000) {
+        return 0;
+    }
+    const int whole = tMilli / 1000;
+    const int fraction = tMilli % 1000;
+    std::int64_t term = 1000000000LL;
+    std::int64_t sum = term;
+    const std::int64_t fractionBillionths =
+        static_cast<std::int64_t>(fraction) * 1000000LL;
+    for (int n = 1; n <= 14; ++n) {
+        term = term * fractionBillionths / (1000000000LL * n);
+        if (term == 0) {
+            break;
+        }
+        if ((n % 2) != 0) {
+            sum -= term;
+        } else {
+            sum += term;
+        }
+    }
+    std::int64_t scale = 1000000000LL;
+    for (int i = 0; i < whole; ++i) {
+        scale = scale * 367879441LL / 1000000000LL;
+    }
+    const std::int64_t billionths = sum * scale / 1000000000LL;
+    return static_cast<std::int32_t>((billionths + 500000LL) / 1000000LL);
+}
+
+std::int32_t smoothstepMilli(std::int32_t tMilli) {
+    if (tMilli <= 0) {
+        return 0;
+    }
+    if (tMilli >= 1000) {
+        return 1000;
+    }
+    const std::int64_t t = tMilli;
+    return static_cast<std::int32_t>(t * t * (3000 - 2 * t) / 1000000LL);
+}
+
+std::int32_t gaussianMilli(std::int64_t dx, std::int64_t radiusX,
+                           std::int64_t dz, std::int64_t radiusZ) {
+    const std::int64_t norm =
+        dx * dx * 1000 / (radiusX * radiusX) +
+        dz * dz * 1000 / (radiusZ * radiusZ);
+    const std::int64_t exponent = std::min(norm / 2, std::int64_t{20000});
+    return expNegMilli(static_cast<std::int32_t>(exponent));
+}
+
+// Heights are thousandths of a height unit. Coordinates are world milliunits.
+std::int32_t generatedElevationMilli(std::int32_t x, std::int32_t z) {
+    const auto hill = [x, z](int centerX, int centerZ, int radiusX, int radiusZ,
+                             int heightMilli) {
+        const std::int64_t dx =
+            static_cast<std::int64_t>(x) - static_cast<std::int64_t>(centerX) * 1000;
+        const std::int64_t dz =
+            static_cast<std::int64_t>(z) - static_cast<std::int64_t>(centerZ) * 1000;
+        const std::int32_t weight = gaussianMilli(
+            dx, static_cast<std::int64_t>(radiusX) * 1000,
+            dz, static_cast<std::int64_t>(radiusZ) * 1000);
+        return static_cast<std::int32_t>(
+            static_cast<std::int64_t>(heightMilli) * weight / 1000);
+    };
+    // Western ridge at z=650, from x=160 to x=1100, with a pass at x=560.
+    // The shoulders stay high so the cheap crossing is the pass.
+    constexpr std::int32_t ridgeWest = 160000;
+    constexpr std::int32_t ridgeEast = 1100000;
+    constexpr std::int32_t ridgeFade = 70000;
+    std::int32_t span = 0;
+    if (x > ridgeWest && x < ridgeEast) {
+        span = 1000;
+        if (x < ridgeWest + ridgeFade) {
+            span = smoothstepMilli(
+                static_cast<std::int32_t>(
+                    (static_cast<std::int64_t>(x) - ridgeWest) * 1000 / ridgeFade));
+        } else if (x > ridgeEast - ridgeFade) {
+            span = smoothstepMilli(
+                static_cast<std::int32_t>(
+                    (static_cast<std::int64_t>(ridgeEast) - x) * 1000 / ridgeFade));
+        }
+    }
+    const std::int64_t across = static_cast<std::int64_t>(z) - 650000;
+    const std::int32_t crestWeight = gaussianMilli(across, 50000, 0, 50000);
+    const std::int32_t crest = static_cast<std::int32_t>(
+        static_cast<std::int64_t>(36000) * crestWeight / 1000 * span / 1000);
+    const std::int64_t pass = static_cast<std::int64_t>(x) - 560000;
+    const std::int32_t notch = gaussianMilli(pass, 80000, 0, 80000);
+    const std::int32_t ridge = static_cast<std::int32_t>(
+        static_cast<std::int64_t>(crest) * (1000 - notch) / 1000);
+    return 4000 +
+        hill(1520, 300, 320, 210, 11000) +
+        hill(260, 1180, 240, 170, 9000) +
+        ridge;
+}
+
+} // namespace
+
+namespace {
+
+SimulationCommand makeCommand(SimulationCommandKind kind,
+                              std::uint32_t unitId = 0) {
+    SimulationCommand command;
+    command.kind = kind;
+    command.unitId = unitId;
+    return command;
+}
+
+void applyCommand(Simulation& simulation, const SimulationCommand& command) {
+    switch (command.kind) {
+    case SimulationCommandKind::SelectUnit:
+        simulation.selectUnit(command.unitId);
+        break;
+    case SimulationCommandKind::SelectUnits:
+        simulation.selectUnits(command.unitIds);
+        break;
+    case SimulationCommandKind::ClearSelection:
+        simulation.clearSelection();
+        break;
+    case SimulationCommandKind::Move:
+        simulation.moveSelected(
+            {Simulation::worldFromMilliunits(command.destinationMilliX),
+             Simulation::worldFromMilliunits(command.destinationMilliZ)},
+            command.algorithm);
+        break;
+    case SimulationCommandKind::Step:
+        simulation.step();
+        break;
+    case SimulationCommandKind::SetTeam:
+        simulation.setTeam(command.unitId, command.team);
+        break;
+    case SimulationCommandKind::Attack:
+        simulation.attackSelected(command.unitId);
+        break;
+    }
 }
 
 } // namespace
@@ -71,18 +282,16 @@ Simulation::Simulation(std::size_t unitCount) {
     constexpr int pathColumns = kTerrainColumns;
     constexpr int pathRows = kTerrainRows;
     constexpr float pathClearance = 6.5F + pathCellSize * 0.75F;
-    terrainVertexElevations_.resize(
+    terrainVertexElevationMilliunits_.resize(
         static_cast<std::size_t>((pathColumns + 1) * (pathRows + 1)));
     for (int row = 0; row <= pathRows; ++row) {
         for (int column = 0; column <= pathColumns; ++column) {
-            const float x = static_cast<float>(column) * pathCellSize;
-            const float z = static_cast<float>(row) * pathCellSize;
-            terrainVertexElevations_[static_cast<std::size_t>(
-                row * (pathColumns + 1) + column)] =
-                generatedTerrainElevation(x, z);
+            terrainVertexElevationMilliunits_[static_cast<std::size_t>(
+                row * (pathColumns + 1) + column)] = generatedElevationMilli(
+                    column * kCellMilliunits, row * kCellMilliunits);
         }
     }
-    terrainCellElevations_.resize(
+    terrainCellElevationMilliunits_.resize(
         static_cast<std::size_t>(pathColumns * pathRows));
     for (int row = 0; row < pathRows; ++row) {
         for (int column = 0; column < pathColumns; ++column) {
@@ -90,8 +299,8 @@ Simulation::Simulation(std::size_t unitCount) {
                 (static_cast<float>(column) + 0.5F) * pathCellSize,
                 (static_cast<float>(row) + 0.5F) * pathCellSize
             };
-            terrainCellElevations_[static_cast<std::size_t>(
-                row * pathColumns + column)] = terrainElevation(center);
+            terrainCellElevationMilliunits_[static_cast<std::size_t>(
+                row * pathColumns + column)] = terrainElevationMilliunits(center);
         }
     }
     terrainTransitionCosts_.resize(
@@ -110,11 +319,9 @@ Simulation::Simulation(std::size_t unitCount) {
                 }
                 const auto nextIndex = static_cast<std::size_t>(
                     nextY * pathColumns + nextX);
-                const float elevationDifference = std::abs(
-                    terrainCellElevations_[nextIndex] -
-                    terrainCellElevations_[cellIndex]);
-                const int elevationCost = static_cast<int>(
-                    std::ceil(elevationDifference * kElevationCostPerUnit));
+                const int elevationCost = elevationTransitionCost(
+                    terrainCellElevationMilliunits_[cellIndex],
+                    terrainCellElevationMilliunits_[nextIndex]);
                 terrainTransitionCosts_[cellIndex][neighbor] =
                     kPathGeometricCosts[neighbor] + elevationCost;
             }
@@ -179,73 +386,106 @@ Simulation::Simulation(std::size_t unitCount) {
         unit.id = static_cast<std::uint32_t>(i + 1);
         unit.position = position;
         unit.destination = position;
+        unit.health = kUnitHealth;
         units_.push_back(std::move(unit));
     }
 }
 
-float Simulation::terrainElevation(Vec2 position) const noexcept {
-    const float gridX = std::clamp(position.x, 0.0F, kMapWidth) /
-                        kTerrainCellSize;
-    const float gridZ = std::clamp(position.y, 0.0F, kMapHeight) /
-                        kTerrainCellSize;
-    const int column = std::min(static_cast<int>(gridX), kTerrainColumns - 1);
-    const int row = std::min(static_cast<int>(gridZ), kTerrainRows - 1);
-    const int nextColumn = column + 1;
-    const int nextRow = row + 1;
-    const float xFraction = gridX - static_cast<float>(column);
-    const float zFraction = gridZ - static_cast<float>(row);
-    const auto vertex = [this](int x, int z) {
-        return terrainVertexElevations_[static_cast<std::size_t>(
-            z * (kTerrainColumns + 1) + x)];
+std::int32_t Simulation::terrainElevationMilliunits(Vec2 position) const noexcept {
+    constexpr std::int32_t mapWidth = static_cast<std::int32_t>(kMapWidth) * kWorldMilliunits;
+    constexpr std::int32_t mapHeight = static_cast<std::int32_t>(kMapHeight) * kWorldMilliunits;
+    const std::int32_t x = std::clamp(worldMilliunits(position.x), 0, mapWidth);
+    const std::int32_t z = std::clamp(worldMilliunits(position.y), 0, mapHeight);
+    const int column = std::min(x / kCellMilliunits, kTerrainColumns - 1);
+    const int row = std::min(z / kCellMilliunits, kTerrainRows - 1);
+    const int xFraction = x - column * kCellMilliunits;
+    const int zFraction = z - row * kCellMilliunits;
+    const auto vertex = [this](int columnIndex, int rowIndex) -> std::int64_t {
+        return terrainVertexElevationMilliunits_[static_cast<std::size_t>(
+            rowIndex * (kTerrainColumns + 1) + columnIndex)];
     };
-    const float top = vertex(column, row) * (1.0F - xFraction) +
-                      vertex(nextColumn, row) * xFraction;
-    const float bottom = vertex(column, nextRow) * (1.0F - xFraction) +
-                         vertex(nextColumn, nextRow) * xFraction;
-    return top * (1.0F - zFraction) + bottom * zFraction;
+    const std::int64_t cell = kCellMilliunits;
+    const std::int64_t top =
+        vertex(column, row) * (cell - xFraction) +
+        vertex(column + 1, row) * xFraction;
+    const std::int64_t bottom =
+        vertex(column, row + 1) * (cell - xFraction) +
+        vertex(column + 1, row + 1) * xFraction;
+    const std::int64_t area = cell * cell;
+    return static_cast<std::int32_t>(
+        (top * (cell - zFraction) + bottom * zFraction + area / 2) / area);
+}
+
+float Simulation::terrainElevation(Vec2 position) const noexcept {
+    return elevationFromMilliunits(terrainElevationMilliunits(position));
 }
 
 void Simulation::step() {
-    constexpr float tickDistance = kUnitSpeed * kFixedStepSeconds;
     for (auto& unit : units_) {
-        float remainingDistance = tickDistance;
-        while (remainingDistance > 0.0F && unit.nextWaypoint < unit.path.size()) {
-            const auto waypoint = unit.path[unit.nextWaypoint];
-            const float dx = waypoint.x - unit.position.x;
-            const float dy = waypoint.y - unit.position.y;
-            const float distanceSquared = dx * dx + dy * dy;
-            if (distanceSquared <= remainingDistance * remainingDistance) {
-                unit.position = waypoint;
-                remainingDistance -= std::sqrt(distanceSquared);
+        if (!unit.alive || unit.nextWaypoint >= unit.path.size()) {
+            continue;
+        }
+        // Waypoint crossings charge the floored length, so a tick can run
+        // long by less than one milliunit per waypoint entered. The partial
+        // step divides by that floor only when it exceeds the budget.
+        std::int32_t remaining = kMilliunitsPerTick;
+        std::int32_t x = worldMilliunits(unit.position.x);
+        std::int32_t y = worldMilliunits(unit.position.y);
+        bool cancelled = false;
+        while (remaining > 0 && unit.nextWaypoint < unit.path.size()) {
+            const Vec2 waypoint = unit.path[unit.nextWaypoint];
+            const std::int32_t targetX = worldMilliunits(waypoint.x);
+            const std::int32_t targetY = worldMilliunits(waypoint.y);
+            const std::int64_t dx = static_cast<std::int64_t>(targetX) - x;
+            const std::int64_t dy = static_cast<std::int64_t>(targetY) - y;
+            const std::int64_t distanceSquared = dx * dx + dy * dy;
+            const std::int64_t remainingSquared =
+                static_cast<std::int64_t>(remaining) * remaining;
+            if (distanceSquared <= remainingSquared) {
+                x = targetX;
+                y = targetY;
+                remaining -= static_cast<std::int32_t>(floorSqrt(distanceSquared));
                 ++unit.nextWaypoint;
                 continue;
             }
 
-            const float distance = std::sqrt(distanceSquared);
+            const std::int64_t distance = floorSqrt(distanceSquared);
+            const std::int64_t stepX = dx * remaining / distance;
+            const std::int64_t stepY = dy * remaining / distance;
             const Vec2 next{
-                unit.position.x + dx * remainingDistance / distance,
-                unit.position.y + dy * remainingDistance / distance
+                worldFromMilliunits(static_cast<std::int32_t>(x + stepX)),
+                worldFromMilliunits(static_cast<std::int32_t>(y + stepY))
             };
             if (blockedByTerrain(next)) {
                 unit.path.clear();
                 unit.nextWaypoint = 0;
-                unit.destination = unit.position;
+                cancelled = true;
                 break;
             }
-            unit.position = next;
-            remainingDistance = 0.0F;
+            x = static_cast<std::int32_t>(x + stepX);
+            y = static_cast<std::int32_t>(y + stepY);
+            remaining = 0;
+        }
+        unit.position = {worldFromMilliunits(x), worldFromMilliunits(y)};
+        if (cancelled) {
+            unit.destination = unit.position;
         }
     }
+    resolveAttacks();
     ++tickCount_;
+    commandLog_.push_back(makeCommand(SimulationCommandKind::Step));
 }
 
 bool Simulation::selectNearest(Vec2 position, float radius) {
-    clearSelection();
+    clearSelectedFlags();
 
     const float radiusSquared = radius * radius;
     float nearestDistanceSquared = radiusSquared;
     Unit* nearest = nullptr;
     for (auto& unit : units_) {
+        if (!unit.alive) {
+            continue;
+        }
         const float dx = unit.position.x - position.x;
         const float dy = unit.position.y - position.y;
         const float distanceSquared = dx * dx + dy * dy;
@@ -255,17 +495,21 @@ bool Simulation::selectNearest(Vec2 position, float radius) {
         }
     }
     if (nearest == nullptr) {
+        commandLog_.push_back(makeCommand(SimulationCommandKind::ClearSelection));
         return false;
     }
     nearest->selected = true;
+    commandLog_.push_back(
+        makeCommand(SimulationCommandKind::SelectUnit, nearest->id));
     return true;
 }
 
 bool Simulation::selectUnit(std::uint32_t id) {
-    clearSelection();
+    clearSelectedFlags();
+    commandLog_.push_back(makeCommand(SimulationCommandKind::SelectUnit, id));
     const auto unit = std::find_if(units_.begin(), units_.end(),
         [id](const Unit& candidate) { return candidate.id == id; });
-    if (unit == units_.end()) {
+    if (unit == units_.end() || !unit->alive) {
         return false;
     }
     unit->selected = true;
@@ -276,29 +520,57 @@ std::size_t Simulation::selectUnits(const std::vector<std::uint32_t>& ids) {
     const std::unordered_set<std::uint32_t> selectedIds(ids.begin(), ids.end());
     std::size_t count = 0;
     for (auto& unit : units_) {
-        unit.selected = selectedIds.contains(unit.id);
+        unit.selected = unit.alive && selectedIds.contains(unit.id);
         count += unit.selected ? 1U : 0U;
     }
+    SimulationCommand command;
+    command.kind = SimulationCommandKind::SelectUnits;
+    command.unitIds = ids;
+    commandLog_.push_back(std::move(command));
     return count;
 }
 
-void Simulation::clearSelection() noexcept {
+void Simulation::clearSelectedFlags() noexcept {
     for (auto& unit : units_) {
         unit.selected = false;
     }
 }
 
+void Simulation::clearSelection() {
+    clearSelectedFlags();
+    commandLog_.push_back(makeCommand(SimulationCommandKind::ClearSelection));
+}
+
 std::size_t Simulation::moveSelected(Vec2 destination,
                                      PathfindingAlgorithm algorithm) {
+    destination = fromMilli(toMilli(destination));
     const auto count = selectedCount();
     lastMoveCommand_ = {true, destination, count, 0, tickCount_};
     lastPathfindingMetrics_ = {};
+    auto recordMove = [&] {
+        SimulationCommand command;
+        command.kind = SimulationCommandKind::Move;
+        command.destinationMilliX = worldMilliunits(destination.x);
+        command.destinationMilliZ = worldMilliunits(destination.y);
+        command.algorithm = algorithm;
+        commandLog_.push_back(std::move(command));
+    };
     if (count == 0) {
+        recordMove();
         return 0;
     }
 
     const auto columns = static_cast<std::size_t>(
         std::ceil(std::sqrt(static_cast<double>(count))));
+    if (count > 1 && algorithm == PathfindingAlgorithm::FlowField) {
+        routeFormation(destination, columns);
+        recordMove();
+        return count;
+    }
+
+    const auto individual = algorithm == PathfindingAlgorithm::FlowField
+        ? PathfindingAlgorithm::AStar
+        : algorithm;
     std::size_t index = 0;
     for (auto& unit : units_) {
         if (!unit.selected) {
@@ -308,17 +580,100 @@ std::size_t Simulation::moveSelected(Vec2 destination,
         unit.path.clear();
         unit.nextWaypoint = 0;
         if (findPath(unit.position, target, unit.path, unit.destination,
-                     lastPathfindingMetrics_, algorithm)) {
+                     lastPathfindingMetrics_, individual)) {
             ++lastMoveCommand_.unitsRouted;
         } else {
             unit.destination = unit.position;
         }
         ++index;
     }
+    recordMove();
     return count;
 }
 
+bool Simulation::setTeam(std::uint32_t id, std::uint8_t team) {
+    SimulationCommand command;
+    command.kind = SimulationCommandKind::SetTeam;
+    command.unitId = id;
+    command.team = team;
+    commandLog_.push_back(std::move(command));
+    Unit* unit = findUnit(id);
+    if (unit == nullptr) {
+        return false;
+    }
+    unit->team = team;
+    return true;
+}
+
+std::size_t Simulation::attackSelected(std::uint32_t targetId) {
+    SimulationCommand command;
+    command.kind = SimulationCommandKind::Attack;
+    command.unitId = targetId;
+    commandLog_.push_back(std::move(command));
+    std::size_t count = 0;
+    for (Unit& unit : units_) {
+        if (!unit.selected || !unit.alive) {
+            continue;
+        }
+        unit.attackTarget = targetId;
+        ++count;
+    }
+    return count;
+}
+
+Unit* Simulation::findUnit(std::uint32_t id) noexcept {
+    if (id == 0 || static_cast<std::size_t>(id) > units_.size()) {
+        return nullptr;
+    }
+    Unit& unit = units_[static_cast<std::size_t>(id - 1)];
+    return unit.id == id ? &unit : nullptr;
+}
+
+void Simulation::resolveAttacks() {
+    std::vector<std::int32_t> damage(units_.size(), 0);
+    const std::int64_t range = kAttackRangeMilliunits;
+    const std::int64_t rangeSquared = range * range;
+    for (const Unit& attacker : units_) {
+        if (!attacker.alive || attacker.attackTarget == 0) {
+            continue;
+        }
+        const Unit* target = findUnit(attacker.attackTarget);
+        if (target == nullptr || !target->alive || target->team == attacker.team) {
+            continue;
+        }
+        const std::int64_t dx = static_cast<std::int64_t>(worldMilliunits(attacker.position.x)) -
+            worldMilliunits(target->position.x);
+        const std::int64_t dy = static_cast<std::int64_t>(worldMilliunits(attacker.position.y)) -
+            worldMilliunits(target->position.y);
+        if (dx * dx + dy * dy > rangeSquared) {
+            continue;
+        }
+        damage[static_cast<std::size_t>(target->id - 1)] += kAttackDamage;
+    }
+    for (std::size_t index = 0; index < units_.size(); ++index) {
+        if (damage[index] <= 0) {
+            continue;
+        }
+        Unit& unit = units_[index];
+        if (!unit.alive) {
+            continue;
+        }
+        if (unit.health > damage[index]) {
+            unit.health -= damage[index];
+            continue;
+        }
+        unit.health = 0;
+        unit.alive = false;
+        unit.selected = false;
+        unit.attackTarget = 0;
+        unit.path.clear();
+        unit.nextWaypoint = 0;
+        unit.destination = unit.position;
+    }
+}
+
 std::size_t Simulation::moveSelected(Vec2 destination, GridPathBackend& backend) {
+    destination = fromMilli(toMilli(destination));
     const auto count = selectedCount();
     PathfindingMetrics metrics;
     std::vector<std::size_t> unitIndices;
@@ -346,8 +701,13 @@ std::size_t Simulation::moveSelected(Vec2 destination, GridPathBackend& backend)
         ++selectedIndex;
     }
 
+    std::vector<float> cellElevations(terrainCellElevationMilliunits_.size());
+    for (std::size_t cell = 0; cell < cellElevations.size(); ++cell) {
+        cellElevations[cell] = elevationFromMilliunits(
+            terrainCellElevationMilliunits_[cell]);
+    }
     const auto results = count == 0 ? std::vector<GridPathResult>{} :
-        backend.search(blockedPathCells_, terrainCellElevations_,
+        backend.search(blockedPathCells_, cellElevations,
                        terrainTransitionCosts_, queries);
     if (results.size() != count) {
         throw std::runtime_error("Path backend returned the wrong number of results.");
@@ -423,6 +783,105 @@ std::size_t Simulation::selectedCount() const noexcept {
         units_.begin(), units_.end(), [](const Unit& unit) { return unit.selected; }));
 }
 
+std::uint64_t Simulation::stateHash() const noexcept {
+    // Version 2, little-endian: version u32, tick u64, each unit in vector
+    // order (id u32, position and destination milliunits i32, next waypoint
+    // u32, selected u8, team u8, alive u8, health i32, attack target u32,
+    // path count u32, each waypoint's milliunits), then the last move
+    // (valid u8, requested milliunits i32, ordered and routed counts u32,
+    // issue tick u64).
+    constexpr std::uint64_t offset = 14695981039346656037ULL;
+    constexpr std::uint64_t prime = 1099511628211ULL;
+    std::uint64_t hash = offset;
+    const auto mix = [&hash](std::uint64_t value, int bytes) noexcept {
+        for (int byte = 0; byte < bytes; ++byte) {
+            hash ^= static_cast<std::uint8_t>(value >> (8 * byte));
+            hash *= prime;
+        }
+    };
+    mix(2U, 4);
+    mix(tickCount_, 8);
+    for (const Unit& unit : units_) {
+        const auto milli = [](float world) noexcept {
+            return static_cast<std::uint32_t>(worldMilliunits(world));
+        };
+        mix(unit.id, 4);
+        mix(milli(unit.position.x), 4);
+        mix(milli(unit.position.y), 4);
+        mix(milli(unit.destination.x), 4);
+        mix(milli(unit.destination.y), 4);
+        mix(static_cast<std::uint32_t>(unit.nextWaypoint), 4);
+        mix(unit.selected ? 1U : 0U, 1);
+        mix(unit.team, 1);
+        mix(unit.alive ? 1U : 0U, 1);
+        mix(static_cast<std::uint32_t>(unit.health), 4);
+        mix(unit.attackTarget, 4);
+        mix(static_cast<std::uint32_t>(unit.path.size()), 4);
+        for (const Vec2& waypoint : unit.path) {
+            mix(milli(waypoint.x), 4);
+            mix(milli(waypoint.y), 4);
+        }
+    }
+    mix(lastMoveCommand_.valid ? 1U : 0U, 1);
+    mix(static_cast<std::uint32_t>(
+            worldMilliunits(lastMoveCommand_.requestedDestination.x)), 4);
+    mix(static_cast<std::uint32_t>(
+            worldMilliunits(lastMoveCommand_.requestedDestination.y)), 4);
+    mix(static_cast<std::uint32_t>(lastMoveCommand_.unitsOrdered), 4);
+    mix(static_cast<std::uint32_t>(lastMoveCommand_.unitsRouted), 4);
+    mix(lastMoveCommand_.issuedAtTick, 8);
+    return hash;
+}
+
+void Simulation::replay(Simulation& simulation,
+                        const std::vector<SimulationCommand>& commands) {
+    for (const SimulationCommand& command : commands) {
+        applyCommand(simulation, command);
+    }
+}
+
+ReplayDivergence Simulation::findReplayDivergence(
+    std::size_t unitCount,
+    const std::vector<SimulationCommand>& leftLog,
+    const std::vector<SimulationCommand>& rightLog) {
+    Simulation left(unitCount);
+    Simulation right(unitCount);
+    ReplayDivergence report;
+    report.leftHash = left.stateHash();
+    report.rightHash = right.stateHash();
+    if (report.leftHash != report.rightHash) {
+        report.kind = ReplayDivergenceKind::State;
+        report.beforeCommands = true;
+        return report;
+    }
+
+    const std::size_t shared = std::min(leftLog.size(), rightLog.size());
+    for (std::size_t index = 0; index < shared; ++index) {
+        if (leftLog[index] != rightLog[index]) {
+            report.kind = ReplayDivergenceKind::Command;
+            report.commandIndex = index;
+            return report;
+        }
+        applyCommand(left, leftLog[index]);
+        applyCommand(right, rightLog[index]);
+        report.leftHash = left.stateHash();
+        report.rightHash = right.stateHash();
+        report.commandIndex = index;
+        if (report.leftHash != report.rightHash) {
+            report.kind = ReplayDivergenceKind::State;
+            return report;
+        }
+    }
+    if (leftLog.size() != rightLog.size()) {
+        report.kind = ReplayDivergenceKind::Command;
+        report.commandIndex = shared;
+        return report;
+    }
+    report.kind = ReplayDivergenceKind::None;
+    report.commandIndex = shared;
+    return report;
+}
+
 bool Simulation::blockedByTerrain(Vec2 position) const noexcept {
     constexpr float clearance = 6.5F;
     return std::any_of(terrainObstacles_.begin(), terrainObstacles_.end(),
@@ -435,13 +894,19 @@ bool Simulation::blockedByTerrain(Vec2 position) const noexcept {
 }
 
 bool Simulation::segmentBlockedByTerrain(Vec2 start, Vec2 end) const noexcept {
-    const float dx = end.x - start.x;
-    const float dy = end.y - start.y;
-    const auto samples = static_cast<int>(
-        std::ceil(std::max(std::abs(dx), std::abs(dy)) / 2.0F));
+    const MilliPoint from = toMilli(start);
+    const MilliPoint to = toMilli(end);
+    const std::int64_t dx = static_cast<std::int64_t>(to.x) - from.x;
+    const std::int64_t dy = static_cast<std::int64_t>(to.y) - from.y;
+    constexpr std::int64_t sampleSpacing = 2 * Simulation::kWorldMilliunits;
+    const std::int64_t span = std::max(abs64(dx), abs64(dy));
+    const int samples = static_cast<int>((span + sampleSpacing - 1) / sampleSpacing);
     for (int i = 1; i <= samples; ++i) {
-        const float t = static_cast<float>(i) / static_cast<float>(samples);
-        if (blockedByTerrain({start.x + dx * t, start.y + dy * t})) {
+        const MilliPoint point{
+            static_cast<std::int32_t>(from.x + dx * i / samples),
+            static_cast<std::int32_t>(from.y + dy * i / samples)
+        };
+        if (blockedByTerrain(fromMilli(point))) {
             return true;
         }
     }
@@ -451,30 +916,24 @@ bool Simulation::segmentBlockedByTerrain(Vec2 start, Vec2 end) const noexcept {
 bool Simulation::preparePath(Vec2 start, Vec2 requestedDestination,
                              PreparedPath& prepared,
                              PathfindingMetrics& metrics) const {
-    constexpr float cellSize = kTerrainCellSize;
     constexpr int columns = kTerrainColumns;
     constexpr int rows = kTerrainRows;
-    const auto cellCenter = [](int index) {
-        const int x = index % columns;
-        const int y = index / columns;
-        return Vec2{(static_cast<float>(x) + 0.5F) * cellSize,
-                    (static_cast<float>(y) + 0.5F) * cellSize};
-    };
-    const auto cellForPosition = [](Vec2 position) {
-        const int x = std::clamp(static_cast<int>(position.x / cellSize),
-                                 0, columns - 1);
-        const int y = std::clamp(static_cast<int>(position.y / cellSize),
-                                 0, rows - 1);
-        return y * columns + x;
-    };
+    const MilliPoint startMilli = toMilli(start);
+    const MilliPoint destinationMilli = toMilli(requestedDestination);
     const auto isBlocked = [this](int index) {
         return blockedPathCells_[static_cast<std::size_t>(index)] != 0;
     };
+    const auto axisGap = [](int cell, std::int32_t origin, bool open) {
+        if (!open) {
+            return std::numeric_limits<std::int64_t>::max();
+        }
+        return abs64(static_cast<std::int64_t>(columnCenterMilli(cell)) - origin);
+    };
 
-    int startNode = cellForPosition(start);
+    int startNode = cellIndexForMilli(startMilli);
     const int positionStartNode = startNode;
     if (isBlocked(startNode)) {
-        float nearestStartDistance = std::numeric_limits<float>::max();
+        std::int64_t nearestStartDistance = std::numeric_limits<std::int64_t>::max();
         int accessibleStartNode = -1;
         const int startX = startNode % columns;
         const int startY = startNode / columns;
@@ -500,48 +959,37 @@ bool Simulation::preparePath(Vec2 start, Vec2 requestedDestination,
                     if (isBlocked(index)) {
                         continue;
                     }
-                    const auto point = cellCenter(index);
-                    const float dx = point.x - start.x;
-                    const float dy = point.y - start.y;
-                    const float distanceSquared = dx * dx + dy * dy;
+                    const MilliPoint point = cellCenterMilli(index);
+                    const std::int64_t dx =
+                        static_cast<std::int64_t>(point.x) - startMilli.x;
+                    const std::int64_t dy =
+                        static_cast<std::int64_t>(point.y) - startMilli.y;
+                    const std::int64_t distanceSquared = dx * dx + dy * dy;
                     if ((distanceSquared < nearestStartDistance ||
                          (distanceSquared == nearestStartDistance &&
                           index < accessibleStartNode)) &&
-                        !segmentBlockedByTerrain(start, point)) {
+                        !segmentBlockedByTerrain(start, fromMilli(point))) {
                         nearestStartDistance = distanceSquared;
                         accessibleStartNode = index;
                     }
                 }
             }
 
-            float nearestUnsearchedAxisDistance = std::numeric_limits<float>::max();
             const int leftX = minX - 1;
             const int rightX = maxX + 1;
             const int topY = minY - 1;
             const int bottomY = maxY + 1;
-            if (leftX >= 0) {
-                nearestUnsearchedAxisDistance = std::min(
-                    nearestUnsearchedAxisDistance,
-                    std::abs((static_cast<float>(leftX) + 0.5F) * cellSize - start.x));
-            }
-            if (rightX < columns) {
-                nearestUnsearchedAxisDistance = std::min(
-                    nearestUnsearchedAxisDistance,
-                    std::abs((static_cast<float>(rightX) + 0.5F) * cellSize - start.x));
-            }
-            if (topY >= 0) {
-                nearestUnsearchedAxisDistance = std::min(
-                    nearestUnsearchedAxisDistance,
-                    std::abs((static_cast<float>(topY) + 0.5F) * cellSize - start.y));
-            }
-            if (bottomY < rows) {
-                nearestUnsearchedAxisDistance = std::min(
-                    nearestUnsearchedAxisDistance,
-                    std::abs((static_cast<float>(bottomY) + 0.5F) * cellSize - start.y));
-            }
+            const std::int64_t nearestUnsearchedAxisDistance = std::min({
+                axisGap(leftX, startMilli.x, leftX >= 0),
+                axisGap(rightX, startMilli.x, rightX < columns),
+                axisGap(topY, startMilli.y, topY >= 0),
+                axisGap(bottomY, startMilli.y, bottomY < rows)
+            });
             if (accessibleStartNode >= 0 &&
-                nearestStartDistance < nearestUnsearchedAxisDistance *
-                                           nearestUnsearchedAxisDistance) {
+                (nearestUnsearchedAxisDistance ==
+                     std::numeric_limits<std::int64_t>::max() ||
+                 nearestStartDistance < nearestUnsearchedAxisDistance *
+                                            nearestUnsearchedAxisDistance)) {
                 break;
             }
         }
@@ -551,9 +999,9 @@ bool Simulation::preparePath(Vec2 start, Vec2 requestedDestination,
         startNode = accessibleStartNode;
     }
     int goalNode = -1;
-    float nearestGoalDistance = std::numeric_limits<float>::max();
-    const int destinationX = cellForPosition(requestedDestination) % columns;
-    const int destinationY = cellForPosition(requestedDestination) / columns;
+    std::int64_t nearestGoalDistance = std::numeric_limits<std::int64_t>::max();
+    const int destinationX = cellIndexForMilli(destinationMilli) % columns;
+    const int destinationY = cellIndexForMilli(destinationMilli) / columns;
     const int maxSearchRadius = std::max({
         destinationX, columns - 1 - destinationX,
         destinationY, rows - 1 - destinationY
@@ -577,10 +1025,12 @@ bool Simulation::preparePath(Vec2 start, Vec2 requestedDestination,
                 if (isBlocked(index)) {
                     continue;
                 }
-                const auto point = cellCenter(index);
-                const float dx = point.x - requestedDestination.x;
-                const float dy = point.y - requestedDestination.y;
-                const float distanceSquared = dx * dx + dy * dy;
+                const MilliPoint point = cellCenterMilli(index);
+                const std::int64_t dx =
+                    static_cast<std::int64_t>(point.x) - destinationMilli.x;
+                const std::int64_t dy =
+                    static_cast<std::int64_t>(point.y) - destinationMilli.y;
+                const std::int64_t distanceSquared = dx * dx + dy * dy;
                 if (distanceSquared < nearestGoalDistance ||
                     (distanceSquared == nearestGoalDistance && index < goalNode)) {
                     nearestGoalDistance = distanceSquared;
@@ -589,38 +1039,21 @@ bool Simulation::preparePath(Vec2 start, Vec2 requestedDestination,
             }
         }
 
-        float nearestUnsearchedAxisDistance = std::numeric_limits<float>::max();
         const int leftX = minX - 1;
         const int rightX = maxX + 1;
         const int topY = minY - 1;
         const int bottomY = maxY + 1;
-        if (leftX >= 0) {
-            nearestUnsearchedAxisDistance = std::min(
-                nearestUnsearchedAxisDistance,
-                std::abs((static_cast<float>(leftX) + 0.5F) * cellSize -
-                         requestedDestination.x));
-        }
-        if (rightX < columns) {
-            nearestUnsearchedAxisDistance = std::min(
-                nearestUnsearchedAxisDistance,
-                std::abs((static_cast<float>(rightX) + 0.5F) * cellSize -
-                         requestedDestination.x));
-        }
-        if (topY >= 0) {
-            nearestUnsearchedAxisDistance = std::min(
-                nearestUnsearchedAxisDistance,
-                std::abs((static_cast<float>(topY) + 0.5F) * cellSize -
-                         requestedDestination.y));
-        }
-        if (bottomY < rows) {
-            nearestUnsearchedAxisDistance = std::min(
-                nearestUnsearchedAxisDistance,
-                std::abs((static_cast<float>(bottomY) + 0.5F) * cellSize -
-                         requestedDestination.y));
-        }
+        const std::int64_t nearestUnsearchedAxisDistance = std::min({
+            axisGap(leftX, destinationMilli.x, leftX >= 0),
+            axisGap(rightX, destinationMilli.x, rightX < columns),
+            axisGap(topY, destinationMilli.y, topY >= 0),
+            axisGap(bottomY, destinationMilli.y, bottomY < rows)
+        });
         if (goalNode >= 0 &&
-            nearestGoalDistance < nearestUnsearchedAxisDistance *
-                                      nearestUnsearchedAxisDistance) {
+            (nearestUnsearchedAxisDistance ==
+                 std::numeric_limits<std::int64_t>::max() ||
+             nearestGoalDistance < nearestUnsearchedAxisDistance *
+                                       nearestUnsearchedAxisDistance)) {
             break;
         }
     }
@@ -680,11 +1113,16 @@ bool Simulation::findPath(Vec2 start, Vec2 requestedDestination,
         const int horizontalCost =
             diagonal * diagonalCost +
             (std::max(dx, dy) - diagonal) * orthogonalCost;
-        const float elevationDifference = std::abs(
-            terrainCellElevations_[static_cast<std::size_t>(from)] -
-            terrainCellElevations_[static_cast<std::size_t>(to)]);
+        const std::int64_t fromElevation =
+            terrainCellElevationMilliunits_[static_cast<std::size_t>(from)];
+        const std::int64_t toElevation =
+            terrainCellElevationMilliunits_[static_cast<std::size_t>(to)];
+        const std::int64_t elevationDifference = fromElevation >= toElevation
+            ? fromElevation - toElevation
+            : toElevation - fromElevation;
+        // Truncation keeps the lower bound admissible: edge costs use ceil.
         const int unavoidableElevationCost = static_cast<int>(
-            elevationDifference * kElevationCostPerUnit);
+            elevationDifference * kElevationCostPerHeightUnit / kElevationMilliunits);
         return horizontalCost + unavoidableElevationCost;
     };
     const auto estimateRemainingCost = [&heuristic, algorithm](int from, int to) {
@@ -769,21 +1207,15 @@ void Simulation::finishPath(const PreparedPath& prepared,
                             const std::vector<int>& nodes,
                             std::vector<Vec2>& path,
                             Vec2& routedDestination) const {
-    const auto cellCenter = [](int index) {
-        const int x = index % kTerrainColumns;
-        const int y = index / kTerrainColumns;
-        return Vec2{(static_cast<float>(x) + 0.5F) * kTerrainCellSize,
-                    (static_cast<float>(y) + 0.5F) * kTerrainCellSize};
-    };
-    const auto start = prepared.start;
-    const auto requestedDestination = prepared.requestedDestination;
+    const auto start = fromMilli(toMilli(prepared.start));
+    const auto requestedDestination = fromMilli(toMilli(prepared.requestedDestination));
     path.clear();
     path.reserve(nodes.size() + 2);
     if (prepared.startNode != prepared.positionStartNode) {
-        path.push_back(cellCenter(prepared.startNode));
+        path.push_back(fromMilli(cellCenterMilli(prepared.startNode)));
     }
     for (const int node : nodes) {
-        path.push_back(cellCenter(node));
+        path.push_back(fromMilli(cellCenterMilli(node)));
     }
 
     const Vec2 lastNode = path.empty() ? start : path.back();
@@ -799,6 +1231,433 @@ void Simulation::finishPath(const PreparedPath& prepared,
         routedDestination = lastNode;
         if (path.empty()) {
             path.push_back(routedDestination);
+        }
+    }
+}
+
+namespace {
+
+constexpr int kNodeCount =
+    Simulation::kTerrainColumns * Simulation::kTerrainRows;
+
+Vec2 pathCellCenter(int index) {
+    return fromMilli(cellCenterMilli(index));
+}
+
+int pathNeighborDirection(int from, int to) {
+    const int dx = to % Simulation::kTerrainColumns -
+                   from % Simulation::kTerrainColumns;
+    const int dy = to / Simulation::kTerrainColumns -
+                   from / Simulation::kTerrainColumns;
+    for (std::size_t neighbor = 0; neighbor < kPathNeighbors.size(); ++neighbor) {
+        if (kPathNeighbors[neighbor].first == dx &&
+            kPathNeighbors[neighbor].second == dy) {
+            return static_cast<int>(neighbor);
+        }
+    }
+    return -1;
+}
+
+} // namespace
+
+bool Simulation::buildFlowField(int anchor, std::vector<char>& needed,
+                                FlowField& field) {
+    if (anchor < 0 || anchor >= kNodeCount) {
+        return false;
+    }
+    field.anchor = anchor;
+    field.costToAnchor.assign(static_cast<std::size_t>(kNodeCount),
+                               std::numeric_limits<int>::max());
+    field.towardAnchor.assign(static_cast<std::size_t>(kNodeCount), -1);
+    field.costToAnchor[static_cast<std::size_t>(anchor)] = 0;
+
+    int remaining = 0;
+    for (const char watched : needed) {
+        remaining += watched != 0 ? 1 : 0;
+    }
+    if (remaining == 0) {
+        return true;
+    }
+
+    struct OpenNode {
+        int cost;
+        int index;
+    };
+    const auto compare = [](const OpenNode& left, const OpenNode& right) {
+        if (left.cost != right.cost) {
+            return left.cost > right.cost;
+        }
+        return left.index > right.index;
+    };
+    std::priority_queue<OpenNode, std::vector<OpenNode>, decltype(compare)> open(
+        compare);
+    std::vector<char> closed(static_cast<std::size_t>(kNodeCount), 0);
+    open.push({0, anchor});
+    const auto isBlocked = [this](int index) {
+        return blockedPathCells_[static_cast<std::size_t>(index)] != 0;
+    };
+
+    while (!open.empty()) {
+        const auto current = open.top();
+        open.pop();
+        const auto currentIndex = static_cast<std::size_t>(current.index);
+        if (closed[currentIndex] != 0 ||
+            current.cost != field.costToAnchor[currentIndex]) {
+            continue;
+        }
+        closed[currentIndex] = 1;
+        ++lastPathfindingMetrics_.flowFieldNodesExpanded;
+        if (needed[currentIndex] != 0) {
+            needed[currentIndex] = 0;
+            if (--remaining == 0) {
+                break;
+            }
+        }
+
+        const int currentX = current.index % kTerrainColumns;
+        const int currentY = current.index / kTerrainColumns;
+        for (std::size_t neighbor = 0; neighbor < kPathNeighbors.size();
+             ++neighbor) {
+            const auto [dx, dy] = kPathNeighbors[neighbor];
+            const int nextX = currentX + dx;
+            const int nextY = currentY + dy;
+            if (nextX < 0 || nextX >= kTerrainColumns ||
+                nextY < 0 || nextY >= kTerrainRows) {
+                continue;
+            }
+            const int nextIndex = nextY * kTerrainColumns + nextX;
+            if (isBlocked(nextIndex)) {
+                continue;
+            }
+            if (dx != 0 && dy != 0) {
+                const int horizontal = currentY * kTerrainColumns + nextX;
+                const int vertical = nextY * kTerrainColumns + currentX;
+                if (isBlocked(horizontal) || isBlocked(vertical)) {
+                    continue;
+                }
+            }
+            const auto nextIndexSize = static_cast<std::size_t>(nextIndex);
+            const int newCost = current.cost +
+                terrainTransitionCosts_[currentIndex][neighbor];
+            if (newCost >= field.costToAnchor[nextIndexSize]) {
+                continue;
+            }
+            field.costToAnchor[nextIndexSize] = newCost;
+            field.towardAnchor[nextIndexSize] = current.index;
+            open.push({newCost, nextIndex});
+        }
+    }
+    return true;
+}
+
+std::vector<int> Simulation::flowChain(const FlowField& field, int node) const {
+    std::vector<int> chain;
+    if (node < 0 || node >= kNodeCount || field.anchor < 0) {
+        return chain;
+    }
+    for (int guard = 0; guard <= kNodeCount; ++guard) {
+        chain.push_back(node);
+        if (node == field.anchor) {
+            return chain;
+        }
+        const int next = field.towardAnchor[static_cast<std::size_t>(node)];
+        if (next < 0 || next == node) {
+            return {};
+        }
+        node = next;
+    }
+    return {};
+}
+
+bool Simulation::mergedFlowNodes(const FlowField& field, int startNode,
+                                 int goalNode, std::vector<int>& nodes) const {
+    nodes.clear();
+    if (startNode < 0 || goalNode < 0) {
+        return false;
+    }
+    if (startNode == goalNode) {
+        return true;
+    }
+    const auto fromStart = flowChain(field, startNode);
+    const auto fromGoal = flowChain(field, goalNode);
+    if (fromStart.empty() || fromGoal.empty() ||
+        fromStart.back() != field.anchor || fromGoal.back() != field.anchor) {
+        return false;
+    }
+
+    std::vector<char> onGoal(static_cast<std::size_t>(kNodeCount), 0);
+    for (const int node : fromGoal) {
+        onGoal[static_cast<std::size_t>(node)] = 1;
+    }
+    std::size_t mergeIndex = 0;
+    while (mergeIndex < fromStart.size() &&
+           onGoal[static_cast<std::size_t>(fromStart[mergeIndex])] == 0) {
+        ++mergeIndex;
+    }
+    if (mergeIndex == fromStart.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 1; index <= mergeIndex; ++index) {
+        nodes.push_back(fromStart[index]);
+    }
+    const auto merge = std::find(fromGoal.begin(), fromGoal.end(),
+                                 fromStart[mergeIndex]);
+    if (merge == fromGoal.end()) {
+        nodes.clear();
+        return false;
+    }
+    for (auto step = merge; step != fromGoal.begin();) {
+        --step;
+        nodes.push_back(*step);
+    }
+    return true;
+}
+
+bool Simulation::formationOffsetPath(const std::vector<Vec2>& spine, Vec2 start,
+                                     Vec2 slot, std::vector<Vec2>& path,
+                                     Vec2& routedDestination) const {
+    if (spine.empty()) {
+        return false;
+    }
+    const MilliPoint startMilli = toMilli(start);
+    const MilliPoint slotMilli = toMilli(slot);
+    const MilliPoint spineFront = toMilli(spine.front());
+    const MilliPoint spineBack = toMilli(spine.back());
+    const std::int64_t startOffsetX =
+        static_cast<std::int64_t>(startMilli.x) - spineFront.x;
+    const std::int64_t startOffsetY =
+        static_cast<std::int64_t>(startMilli.y) - spineFront.y;
+    const std::int64_t endOffsetX =
+        static_cast<std::int64_t>(slotMilli.x) - spineBack.x;
+    const std::int64_t endOffsetY =
+        static_cast<std::int64_t>(slotMilli.y) - spineBack.y;
+    std::vector<Vec2> candidate;
+    candidate.reserve(spine.size() + 1);
+    MilliPoint previous = startMilli;
+    const std::int64_t steps = static_cast<std::int64_t>(spine.size());
+    for (std::size_t index = 0; index < spine.size(); ++index) {
+        const MilliPoint spinePoint = toMilli(spine[index]);
+        const std::int64_t progress = static_cast<std::int64_t>(index) + 1;
+        const std::int64_t offsetX =
+            startOffsetX + (endOffsetX - startOffsetX) * progress / steps;
+        const std::int64_t offsetY =
+            startOffsetY + (endOffsetY - startOffsetY) * progress / steps;
+        const MilliPoint desired = clampMilli(
+            static_cast<std::int64_t>(spinePoint.x) + offsetX,
+            static_cast<std::int64_t>(spinePoint.y) + offsetY);
+        bool placed = false;
+        for (int step = 0; step <= 4; ++step) {
+            const MilliPoint point{
+                static_cast<std::int32_t>(
+                    desired.x + (static_cast<std::int64_t>(spinePoint.x) - desired.x) *
+                                    step / 4),
+                static_cast<std::int32_t>(
+                    desired.y + (static_cast<std::int64_t>(spinePoint.y) - desired.y) *
+                                    step / 4)
+            };
+            const Vec2 world = fromMilli(point);
+            if (blockedByTerrain(world) ||
+                segmentBlockedByTerrain(fromMilli(previous), world)) {
+                continue;
+            }
+            if (candidate.empty() || candidate.back().x != world.x ||
+                candidate.back().y != world.y) {
+                candidate.push_back(world);
+            }
+            previous = point;
+            placed = true;
+            break;
+        }
+        if (!placed) {
+            return false;
+        }
+    }
+
+    const Vec2 slotWorld = fromMilli(slotMilli);
+    const Vec2 previousWorld = fromMilli(previous);
+    if (!blockedByTerrain(slotWorld) &&
+        !segmentBlockedByTerrain(previousWorld, slotWorld)) {
+        if (candidate.empty() || candidate.back().x != slotWorld.x ||
+            candidate.back().y != slotWorld.y) {
+            candidate.push_back(slotWorld);
+        }
+        routedDestination = slotWorld;
+    } else if (!candidate.empty()) {
+        routedDestination = candidate.back();
+    } else {
+        return false;
+    }
+    path = std::move(candidate);
+    return !path.empty();
+}
+
+bool Simulation::gridRouteCost(int startNode, const std::vector<int>& nodes,
+                               std::uint64_t& cost) const {
+    cost = 0;
+    int previous = startNode;
+    for (const int node : nodes) {
+        const int direction = pathNeighborDirection(previous, node);
+        if (direction < 0 || previous < 0 || previous >= kNodeCount) {
+            return false;
+        }
+        cost += static_cast<std::uint64_t>(
+            terrainTransitionCosts_[static_cast<std::size_t>(previous)][
+                static_cast<std::size_t>(direction)]);
+        previous = node;
+    }
+    return true;
+}
+
+std::uint64_t Simulation::polylineRouteCost(
+    Vec2 start, const std::vector<Vec2>& path) const {
+    std::uint64_t total = 0;
+    MilliPoint previous = toMilli(start);
+    for (const auto point : path) {
+        const MilliPoint current = toMilli(point);
+        const auto geometric = geometricMilliCost(
+            static_cast<std::int64_t>(current.x) - previous.x,
+            static_cast<std::int64_t>(current.y) - previous.y);
+        const auto elevation = static_cast<std::uint64_t>(elevationTransitionCost(
+            terrainElevationMilliunits(fromMilli(previous)),
+            terrainElevationMilliunits(point)));
+        total += geometric + elevation;
+        previous = current;
+    }
+    return total;
+}
+
+void Simulation::routeFormation(Vec2 destination, std::size_t columns) {
+    const Vec2 clamped{
+        std::clamp(destination.x, 0.0F, kMapWidth),
+        std::clamp(destination.y, 0.0F, kMapHeight)
+    };
+    // The anchor is the traversable cell nearest the clicked point. Probing from
+    // a placed unit avoids rejecting an order whose click lies inside collision:
+    // start resolution requires a clear approach, while goal resolution does not.
+    PreparedPath anchorPrepared;
+    if (units_.empty() ||
+        !preparePath(units_.front().position, clamped, anchorPrepared,
+                     lastPathfindingMetrics_)) {
+        for (auto& unit : units_) {
+            if (!unit.selected) {
+                continue;
+            }
+            unit.path.clear();
+            unit.nextWaypoint = 0;
+            unit.destination = unit.position;
+        }
+        return;
+    }
+
+    struct Assignment {
+        std::size_t unitIndex = 0;
+        PreparedPath prepared;
+        Vec2 slot;
+        bool ready = false;
+    };
+    std::vector<Assignment> assignments;
+    assignments.reserve(lastMoveCommand_.unitsOrdered);
+    std::int64_t centroidX = 0;
+    std::int64_t centroidY = 0;
+    std::size_t selectedIndex = 0;
+    for (std::size_t index = 0; index < units_.size(); ++index) {
+        auto& unit = units_[index];
+        if (!unit.selected) {
+            continue;
+        }
+        Assignment assignment;
+        assignment.unitIndex = index;
+        assignment.slot = formationDestination(destination, columns, selectedIndex);
+        assignment.ready = preparePath(unit.position, assignment.slot,
+                                        assignment.prepared,
+                                        lastPathfindingMetrics_);
+        centroidX += Simulation::worldMilliunits(unit.position.x);
+        centroidY += Simulation::worldMilliunits(unit.position.y);
+        assignments.push_back(assignment);
+        unit.path.clear();
+        unit.nextWaypoint = 0;
+        unit.destination = unit.position;
+        ++selectedIndex;
+    }
+    const auto count = static_cast<std::int64_t>(assignments.size());
+    const Vec2 centroid = fromMilli({
+        static_cast<std::int32_t>(count == 0 ? 0 : centroidX / count),
+        static_cast<std::int32_t>(count == 0 ? 0 : centroidY / count)
+    });
+
+    std::vector<char> needed(static_cast<std::size_t>(kNodeCount), 0);
+    const auto watch = [&needed, anchor = anchorPrepared.goalNode](int node) {
+        if (node < 0 || node == anchor || node >= kNodeCount) {
+            return;
+        }
+        needed[static_cast<std::size_t>(node)] = 1;
+    };
+    for (const auto& assignment : assignments) {
+        if (!assignment.ready) {
+            continue;
+        }
+        watch(assignment.prepared.startNode);
+        watch(assignment.prepared.goalNode);
+    }
+    PreparedPath centroidPrepared;
+    const bool centroidReady = preparePath(
+        centroid, clamped, centroidPrepared, lastPathfindingMetrics_);
+    if (centroidReady) {
+        watch(centroidPrepared.startNode);
+    }
+
+    FlowField field;
+    if (!buildFlowField(anchorPrepared.goalNode, needed, field)) {
+        return;
+    }
+
+    std::vector<Vec2> spine;
+    if (centroidReady) {
+        const auto chain = flowChain(field, centroidPrepared.startNode);
+        if (!chain.empty() && chain.back() == field.anchor) {
+            spine.reserve(chain.size());
+            for (const int node : chain) {
+                spine.push_back(pathCellCenter(node));
+            }
+        }
+    }
+
+    for (const auto& assignment : assignments) {
+        auto& unit = units_[assignment.unitIndex];
+        if (!assignment.ready) {
+            continue;
+        }
+        std::vector<Vec2> offsetPath;
+        Vec2 routedDestination;
+        if (!spine.empty() &&
+            formationOffsetPath(spine, unit.position, assignment.slot,
+                                offsetPath, routedDestination)) {
+            unit.path = std::move(offsetPath);
+            unit.destination = routedDestination;
+            lastPathfindingMetrics_.pathCost +=
+                polylineRouteCost(unit.position, unit.path);
+            ++lastPathfindingMetrics_.formationPaths;
+            ++lastMoveCommand_.unitsRouted;
+            continue;
+        }
+
+        std::vector<int> nodes;
+        std::uint64_t cost = 0;
+        if (mergedFlowNodes(field, assignment.prepared.startNode,
+                            assignment.prepared.goalNode, nodes) &&
+            gridRouteCost(assignment.prepared.startNode, nodes, cost)) {
+            finishPath(assignment.prepared, nodes, unit.path, unit.destination);
+            lastPathfindingMetrics_.pathCost += cost;
+            ++lastPathfindingMetrics_.formationPaths;
+            ++lastMoveCommand_.unitsRouted;
+            continue;
+        }
+
+        if (findPath(unit.position, assignment.slot, unit.path, unit.destination,
+                     lastPathfindingMetrics_, PathfindingAlgorithm::AStar)) {
+            ++lastPathfindingMetrics_.formationFallbacks;
+            ++lastMoveCommand_.unitsRouted;
         }
     }
 }

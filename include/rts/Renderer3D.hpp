@@ -14,6 +14,7 @@ struct RendererStats {
     double sceneBuildMilliseconds = 0.0;
     double vertexUploadMilliseconds = 0.0;
     double commandRecordMilliseconds = 0.0;
+    // Color-output to bottom-of-pipe, after the swapchain image wait.
     double gpuRenderMilliseconds = 0.0;
     std::size_t sceneVertexCount = 0;
     std::uint32_t renderWidth = 0;
@@ -33,6 +34,10 @@ public:
 
     void draw(const Simulation& simulation, const Camera3D& camera,
               const ScreenRectangle* selectionRectangle = nullptr);
+    // Size of the drawable the next frame will use. This follows the Vulkan
+    // surface when it defines an extent, which can disagree with GLFW's
+    // framebuffer size on a Retina display.
+    bool drawableSize(int& width, int& height) const;
     RendererStats stats() const noexcept;
 
 private:

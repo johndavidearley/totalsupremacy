@@ -43,7 +43,8 @@ struct PathfindingScenario {
 
 constexpr PathfindingScenario kPathfindingScenarios[]{
     {"astar", rts::PathfindingAlgorithm::AStar},
-    {"dijkstra", rts::PathfindingAlgorithm::Dijkstra}
+    {"dijkstra", rts::PathfindingAlgorithm::Dijkstra},
+    {"flowfield", rts::PathfindingAlgorithm::FlowField}
 };
 
 double elapsedMilliseconds(Clock::time_point start, Clock::time_point end) {
@@ -138,13 +139,19 @@ void benchmarkPopulation(std::size_t population) {
                 totalMetrics.goalCellsExamined += metrics.goalCellsExamined;
                 totalMetrics.aStarNodesExpanded += metrics.aStarNodesExpanded;
                 totalMetrics.dijkstraNodesExpanded += metrics.dijkstraNodesExpanded;
+                totalMetrics.flowFieldNodesExpanded += metrics.flowFieldNodesExpanded;
+                totalMetrics.formationPaths += metrics.formationPaths;
+                totalMetrics.formationFallbacks += metrics.formationFallbacks;
                 totalMetrics.pathCost += metrics.pathCost;
             }
 
             const double routedUnits = static_cast<double>(kRouteTrials * population);
             const auto expanded = pathfinding.algorithm == rts::PathfindingAlgorithm::AStar
                 ? totalMetrics.aStarNodesExpanded
-                : totalMetrics.dijkstraNodesExpanded;
+                : pathfinding.algorithm == rts::PathfindingAlgorithm::Dijkstra
+                    ? totalMetrics.dijkstraNodesExpanded
+                    : totalMetrics.flowFieldNodesExpanded +
+                      totalMetrics.aStarNodesExpanded;
             std::cout << population << ',' << scenario.name << ','
                       << pathfinding.name << ','
                       << scenario.destination.x << ',' << scenario.destination.y << ','
@@ -156,6 +163,10 @@ void benchmarkPopulation(std::size_t population) {
                       << static_cast<double>(totalMetrics.startCellsExamined) / routedUnits
                       << ','
                       << static_cast<double>(expanded) / routedUnits << ','
+                      << static_cast<double>(totalMetrics.formationPaths) / routedUnits
+                      << ','
+                      << static_cast<double>(totalMetrics.formationFallbacks) / routedUnits
+                      << ','
                       << static_cast<double>(totalMetrics.pathCost) / routedUnits
                       << ',' << stepMedian << ',' << stepP95 << ','
                       << positionChecksum << '\n';
@@ -175,8 +186,9 @@ int main() {
                   << "pathfinding_algorithms," << std::size(kPathfindingScenarios) << '\n'
                   << "units,scenario,algorithm,destination_x,destination_y,route_median_ms,"
                      "route_p95_ms,goal_cells_per_unit,start_cells_per_unit,"
-                     "expanded_nodes_per_unit,path_cost_per_unit,step_median_ms_per_tick,"
-                     "step_p95_ms_per_tick,position_checksum\n";
+                     "expanded_nodes_per_unit,formation_paths_per_unit,"
+                     "formation_fallbacks_per_unit,path_cost_per_unit,"
+                     "step_median_ms_per_tick,step_p95_ms_per_tick,position_checksum\n";
         for (const auto population : kPopulationSizes) {
             benchmarkPopulation(population);
         }

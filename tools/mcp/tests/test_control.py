@@ -4,6 +4,7 @@ import json
 import math
 import subprocess
 import sys
+import time
 
 
 def main() -> int:
@@ -57,7 +58,11 @@ def main() -> int:
         assert moved["path_remaining"] > 0
 
         request("pause 0")
+        time.sleep(0.08)
         request("advance 1", succeeds=False)
+        state = request("state")
+        assert state["paused"] is False
+        assert state["tick"] == 10, state["tick"]
         state = request("camera 52 42 0.4 1000 700 1")
         assert state["camera"]["perspective"] is True
         assert math.isclose(state["camera"]["focus_x"], 1000, abs_tol=0.01)

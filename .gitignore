@@ -1,6 +1,7 @@
 build/
 cmake-build-*/
 .venv/
+playtest-artifacts/
 __pycache__/
 *.egg-info/
 CMakeCache.txt

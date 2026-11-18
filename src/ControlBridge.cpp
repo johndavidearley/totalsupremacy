@@ -29,6 +29,7 @@ std::string stateResponse(const Simulation& simulation, const Camera3D& camera,
     std::ostringstream result;
     result << std::setprecision(7)
            << "{\"ok\":true,\"result\":{\"tick\":" << simulation.tickCount()
+           << ",\"state_hash\":" << simulation.stateHash()
            << ",\"unit_count\":" << simulation.units().size()
            << ",\"selected_count\":" << simulation.selectedCount()
            << ",\"paused\":" << (paused ? "true" : "false")
@@ -114,7 +115,11 @@ std::string ControlBridge::execute(const std::string& request, Simulation& simul
                    << ",\"target_z\":" << unit.destination.y
                    << ",\"path_remaining\":"
                    << (unit.path.size() - unit.nextWaypoint)
-                   << ",\"selected\":" << (unit.selected ? "true" : "false") << '}';
+                   << ",\"selected\":" << (unit.selected ? "true" : "false")
+                   << ",\"team\":" << static_cast<unsigned>(unit.team)
+                   << ",\"health\":" << unit.health
+                   << ",\"alive\":" << (unit.alive ? "true" : "false")
+                   << ",\"attack_target\":" << unit.attackTarget << '}';
         }
         result << "]}}";
         return result.str();
@@ -126,6 +131,11 @@ std::string ControlBridge::execute(const std::string& request, Simulation& simul
             return error("select requires a valid unit id");
         }
         if (!simulation.selectUnit(static_cast<std::uint32_t>(id))) {
+            const auto found = std::find_if(simulation.units().begin(), simulation.units().end(),
+                [id](const Unit& unit) { return unit.id == id; });
+            if (found != simulation.units().end() && !found->alive) {
+                return error("unit is dead");
+            }
             return error("unit id was not found");
         }
         return stateResponse(simulation, camera, paused);
@@ -151,9 +161,13 @@ std::string ControlBridge::execute(const std::string& request, Simulation& simul
             return error("select_units received too many IDs");
         }
         for (const auto id : ids) {
-            if (std::none_of(simulation.units().begin(), simulation.units().end(),
-                    [id](const Unit& unit) { return unit.id == id; })) {
+            const auto found = std::find_if(simulation.units().begin(), simulation.units().end(),
+                [id](const Unit& unit) { return unit.id == id; });
+            if (found == simulation.units().end()) {
                 return error("select_units contains an unknown unit ID");
+            }
+            if (!found->alive) {
+                return error("select_units contains a dead unit");
             }
         }
         simulation.selectUnits(ids);
@@ -177,6 +191,30 @@ std::string ControlBridge::execute(const std::string& request, Simulation& simul
         const auto moved = simulation.moveSelected({x, z});
         if (moved == 0) {
             return error("select one or more units before issuing a move");
+        }
+        return stateResponse(simulation, camera, paused);
+    }
+    if (command == "set_team") {
+        unsigned long long id = 0;
+        unsigned long long team = 0;
+        if (!(stream >> id >> team) || !noExtraArguments(stream) || id == 0 ||
+            id > static_cast<unsigned long long>(UINT32_MAX) || team > 255U) {
+            return error("set_team requires a unit id and a team in 0..255");
+        }
+        if (!simulation.setTeam(static_cast<std::uint32_t>(id),
+                                static_cast<std::uint8_t>(team))) {
+            return error("unit id was not found");
+        }
+        return stateResponse(simulation, camera, paused);
+    }
+    if (command == "attack") {
+        unsigned long long target = 0;
+        if (!(stream >> target) || !noExtraArguments(stream) ||
+            target > static_cast<unsigned long long>(UINT32_MAX)) {
+            return error("attack requires a target unit id");
+        }
+        if (simulation.attackSelected(static_cast<std::uint32_t>(target)) == 0) {
+            return error("select one or more units before issuing an attack");
         }
         return stateResponse(simulation, camera, paused);
     }

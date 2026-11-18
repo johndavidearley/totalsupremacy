@@ -16,21 +16,56 @@ MCP stdio server ── private line protocol ── game control queue
 `totalsupremacy_core` has no GLFW or Vulkan dependency. `Simulation` owns a
 contiguous unit vector, initializes a repeatable formation, advances movement
 on a fixed 30 Hz tick, and exposes selection and move-command operations.
-Move commands calculate deterministic A* routes over an obstacle-inflated
-20-unit grid whose cell costs include the absolute elevation change between
-neighbors. Terrain elevation is a deterministic, smoothly interpolated
-heightfield shared by pathfinding and rendering. A* adds a consistent lower
-bound for unavoidable elevation change to its octile heuristic; Dijkstra is
-available for opt-in comparisons. If a unit's start cell is conservatively
-blocked, routing anchors to the nearest traversable cell with a terrain-clear
-approach. Initial units are placed outside terrain collision. Units follow
-waypoint routes, and blocked/adjusted orders are reported in the last-command
-feedback. Elevation currently affects route cost and presentation, not unit
-speed or terrain passability.
+A one-unit move uses deterministic A* over an obstacle-inflated 20-unit grid
+whose cell costs include the absolute elevation change between neighbors.
+A group move builds one Dijkstra integration field from the traversable cell
+nearest the order point, keeps each unit's formation slot, and prefers a
+terrain-clear offset of the group's centroid route. Explicit A* and Dijkstra
+remain available for per-unit comparison. Terrain elevation is a deterministic,
+smoothly interpolated heightfield shared by pathfinding and rendering. A*
+adds a consistent lower bound for unavoidable elevation change to its octile
+heuristic. If a unit's start cell is conservatively blocked, individual
+routing anchors to the nearest traversable cell with a terrain-clear approach.
+Initial units are placed outside terrain collision. Routes are written on a
+0.001-world-unit lattice: formation slots, the group centroid, offset
+waypoints, and the samples that test a segment against obstacles. Units follow
+those waypoints in integer milliunits. One tick travels 2,400 milliunits,
+equal to 72 world units per second at 30 Hz. Terrain elevation uses the same
+kind of integer sample, in thousandths of a height unit. Blocked and adjusted
+orders are reported in the last-command feedback.
+The heightfield is a low base, two broad rises, and a western ridge from
+x=160 to x=1100 at z=650 with a pass at x=560. Samples are integer
+milli-heights. Each grid edge adds
+`ceil(abs(milliHeightChange) * 180 / 1000)` to its geometric cost. That
+makes a short detour through the pass cheaper
+than climbing the crest, while a gentle slope stays cheaper than leaving a
+straight route. Elevation affects route cost and presentation, not unit speed
+or terrain passability.
+
+Authoritative gameplay has a command log and a state hash. The log records
+caller-facing `selectUnit`, `selectUnits`, `clearSelection`, `moveSelected`
+(the destination in milliunits and the CPU algorithm), `setTeam`,
+`attackSelected`, and `step`. `selectNearest` records the unit it resolved,
+or a clear when it misses. A path-backend move is not a replay command.
+`replay` applies that log to a fresh simulation of the same unit count by
+calling those methods, so the replay records an equal log. `stateHash` is
+FNV-1a 64 over little-endian bytes: format version 2, the tick, each unit in
+vector order (id, position and destination milliunits, next waypoint index,
+selection, team, alive, health, attack target, and path waypoints in
+milliunits), then the last move (validity, requested milliunit destination,
+ordered and routed counts, and issue tick). The hash excludes
+the camera, the pause flag, pathfinding metrics, static obstacles, and the
+command log. `findReplayDivergence` replays two logs on fresh simulations
+and stops at the first command or state-hash disagreement. This is the
+replay and desync check. It is not a peer session or a multiplayer
+implementation.
+
 An experimental Vulkan compute benchmark batches per-unit searches through a
 separate pathfinding backend, sharing CPU start/goal preparation and route
-reconstruction. The simulation validates backend paths before applying them;
-the normal application and MCP protocol still use CPU A*.
+reconstruction. The simulation validates backend paths before applying them.
+The normal application and MCP protocol use the shared flow field for group
+orders and CPU A* for one-unit orders. The GPU benchmark still compares its
+per-unit searches with explicit CPU A*.
 Rendering and camera state are presentation concerns, not authoritative game
 state.
 
@@ -39,6 +74,8 @@ at 250 ms. `Renderer3D` batches terrain and procedural unit geometry into
 per-frame Vulkan vertex buffers; a depth attachment handles visibility. GLSL
 shaders are compiled to SPIR-V during the CMake build. The swapchain, depth
 images, frame synchronization, and resize recreation are owned by the renderer.
+The drawable size is the Vulkan surface extent when the surface defines one,
+and the host sizes the camera and pointer from that size.
 The projection shader follows the orbit-camera conventions used by
 UrbanSimCore's Vulkan visualization. Camera ray intersection drives ground
 movement orders and pointer-anchored zoom; move-order picking intersects the
@@ -52,14 +89,18 @@ FastMCP server owns this child process and exposes typed tools over MCP stdio.
 `--headless` omits GLFW and Vulkan while retaining the same core and MCP actions
 for tests.
 
-The MCP time mode starts paused. `advance_ticks` accepts bounded batches of
-explicit ticks only while paused; interactive sessions start live. The bridge
+The MCP time mode starts paused. While the control bridge is attached, the
+simulation advances only through explicit ticks, including after the pause
+flag is cleared. `advance_ticks` accepts bounded batches and still requires
+the pause flag. Interactive sessions without the bridge start live and step
+from the wall clock. The bridge
 supports state, paginated units, selection, movement, pause, explicit
-advancement, camera pose, and stop operations. It opens no network socket.
+advancement, camera pose, and stop operations. The state response includes
+`state_hash`, the decimal `stateHash` value. It opens no network socket.
 
 ## Boundaries and intended evolution
 
-- **Simulation:** deterministic state and commands; no graphics or platform APIs.
+- **Simulation:** deterministic state, command log, and state hash; no graphics or platform APIs.
 - **Renderer:** Vulkan presentation and the 3D camera adapter; replaceable
   without changing simulation types.
 - **MCP host:** Python FastMCP over stdio plus a process-owned local control pipe.
@@ -67,9 +108,12 @@ advancement, camera pose, and stop operations. It opens no network socket.
 - **Tests:** behavior, camera projection/picking math, and end-to-end headless MCP
   control protocol.
 
-The current simulation is single-threaded and has no networking, combat,
-hierarchical navigation, persistence, content pipeline, or mod API. The
-Vulkan/GLFW presentation and simulation control have only been validated on
-macOS so far.
-Add systems only when a playable slice requires them and preserve the explicit
-command boundary as replay and multiplayer requirements become concrete.
+The current simulation is single-threaded. Combat is one infantry attack:
+after movement, a living unit damages an enemy inside 40 world units for 10
+health, and a unit at 0 health stays in place. There is no networking,
+chase order, second archetype, hierarchical navigation, persistence, content
+pipeline, or mod API. The Vulkan/GLFW presentation and simulation control
+have only been validated on macOS so far.
+Add systems only when a playable slice requires them. The command log,
+state hash, and local divergence check are the replay format. Lockstep
+networking was evaluated and is not implemented.

@@ -174,9 +174,15 @@ std::vector<SceneVertex> buildSceneGeometry(const Simulation& simulation) {
     const Color selectedColor{1.0F, 0.76F, 0.23F};
     const Color orderColor{0.9F, 0.84F, 0.49F};
     for (const auto& unit : simulation.units()) {
+        if (!unit.alive) {
+            continue;
+        }
         const float x = unit.position.x;
         const float z = unit.position.y;
         const float ground = simulation.terrainElevation(unit.position);
+        const Color body = unit.team == 1 ? Color{0.80F, 0.32F, 0.28F}
+            : unit.team == 0 ? unitColor
+                             : Color{0.55F, 0.45F, 0.75F};
         if (unit.selected) {
             Vec2 routeStart = unit.position;
             for (std::size_t waypoint = unit.nextWaypoint;
@@ -196,7 +202,7 @@ std::vector<SceneVertex> buildSceneGeometry(const Simulation& simulation) {
         }
         addBox(vertices, x - 5.5F, z - 6.5F, 11.0F, 13.0F,
                ground + 0.05F, 7.0F,
-               unit.selected ? selectedColor : unitColor);
+               unit.selected ? selectedColor : body);
         addBox(vertices, x - 3.3F, z - 3.0F, 6.6F, 6.0F,
                ground + 7.05F, 3.2F,
                unit.selected ? Color{1.0F, 0.84F, 0.43F}

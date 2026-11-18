@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -18,6 +19,13 @@ void require(bool condition, const std::string& message) {
         std::cerr << "FAIL: " << message << '\n';
         std::exit(1);
     }
+}
+
+bool onMilliunitLattice(rts::Vec2 point) {
+    return rts::Simulation::worldFromMilliunits(
+               rts::Simulation::worldMilliunits(point.x)) == point.x &&
+           rts::Simulation::worldFromMilliunits(
+               rts::Simulation::worldMilliunits(point.y)) == point.y;
 }
 
 bool isTerrainClear(const rts::Simulation& simulation, rts::Vec2 point) {
@@ -72,6 +80,51 @@ void testSceneGeometryScaling() {
             "selection rectangle overlay contains four quads");
 }
 
+void testMilliunitMovement() {
+    for (std::int32_t milli = 0;
+         milli <= static_cast<std::int32_t>(rts::Simulation::kMapWidth *
+                                            rts::Simulation::kWorldMilliunits);
+         ++milli) {
+        const float world = rts::Simulation::worldFromMilliunits(milli);
+        if (rts::Simulation::worldMilliunits(world) != milli) {
+            require(false, "milliunit round trip failed at " + std::to_string(milli));
+        }
+    }
+    require(rts::Simulation::worldMilliunits(4.9375F) == 4938 &&
+                rts::Simulation::worldMilliunits(-4.9375F) == -4938,
+            "milliunit rounding ties away from zero");
+    require(rts::Simulation::elevationTransitionCost(0, 0) == 0 &&
+                rts::Simulation::elevationTransitionCost(0, 1000) == 180 &&
+                rts::Simulation::elevationTransitionCost(1000, 0) == 180 &&
+                rts::Simulation::elevationTransitionCost(0, 1) == 1,
+            "elevation edge cost is an integer ceiling");
+
+    rts::Simulation simulation(1);
+    const auto start = simulation.units()[0].position;
+    require(simulation.selectUnit(1), "milliunit scenario selects the starter unit");
+    require(simulation.moveSelected({start.x + 100.0F, start.y}) == 1,
+            "milliunit scenario routes a clear eastward order");
+    require(onMilliunitLattice(simulation.units()[0].destination),
+            "routed destination lies on the milliunit lattice");
+    for (const auto waypoint : simulation.units()[0].path) {
+        require(onMilliunitLattice(waypoint),
+                "route waypoints lie on the milliunit lattice");
+    }
+    simulation.step();
+    const auto once = simulation.units()[0].position;
+    require(once.y == start.y, "a horizontal segment keeps its milliunit row");
+    require(rts::Simulation::worldMilliunits(once.x) -
+                    rts::Simulation::worldMilliunits(start.x) ==
+                rts::Simulation::kMilliunitsPerTick,
+            "one tick advances exactly 2400 milliunits");
+    for (int tick = 0; tick < 4; ++tick) {
+        simulation.step();
+    }
+    require(simulation.units()[0].position.x == start.x + 12.0F &&
+                simulation.units()[0].position.y == start.y,
+            "five ticks advance 12 world units on a clear segment");
+}
+
 void testSelectionAndMovement() {
     rts::Simulation simulation(2);
     const auto firstPosition = simulation.units()[0].position;
@@ -113,6 +166,8 @@ void testMovementStopsAtDestination() {
 void testDeterministicSimulation() {
     rts::Simulation first(1000);
     rts::Simulation second(1000);
+    require(first.stateHash() == second.stateHash(),
+            "fresh simulations share a state hash");
     const auto start = first.units()[0].position;
     require(first.selectNearest(start, 1.0F), "first simulation selects initial unit");
     require(second.selectNearest(start, 1.0F), "second simulation selects same initial unit");
@@ -123,11 +178,257 @@ void testDeterministicSimulation() {
         second.step();
     }
     require(first.tickCount() == second.tickCount(), "tick counts match for equal command streams");
+    require(first.stateHash() == second.stateHash(),
+            "state hashes match for equal command streams");
+    require(first.commandLog() == second.commandLog(),
+            "command logs match for equal command streams");
     for (std::size_t i = 0; i < first.units().size(); ++i) {
         require(first.units()[i].position.x == second.units()[i].position.x &&
                 first.units()[i].position.y == second.units()[i].position.y,
                 "unit states match for equal command streams");
     }
+
+    rts::Simulation replayed(1000);
+    rts::Simulation::replay(replayed, first.commandLog());
+    require(replayed.stateHash() == first.stateHash(),
+            "replaying the command log reproduces the state hash");
+    require(replayed.commandLog() == first.commandLog(),
+            "replay records the same command log");
+
+    const auto beforeExtraStep = first.stateHash();
+    first.step();
+    require(first.stateHash() != beforeExtraStep,
+            "one additional step changes the state hash");
+}
+
+void testCommandLogRecordsCallerCommands() {
+    rts::Simulation simulation(3);
+    const auto initialHash = simulation.stateHash();
+    simulation.clearSelection();
+    require(simulation.stateHash() == initialHash,
+            "clearing an empty selection leaves the state hash unchanged");
+    require(simulation.commandLog().size() == 1 &&
+            simulation.commandLog().front().kind ==
+                rts::SimulationCommandKind::ClearSelection,
+            "clearing an empty selection is still logged");
+
+    require(!simulation.selectNearest({0.0F, 0.0F}, 1.0F),
+            "select nearest misses when no unit is in range");
+    require(simulation.commandLog().back().kind ==
+                rts::SimulationCommandKind::ClearSelection,
+            "a missed nearest selection logs a clear");
+
+    require(!simulation.selectUnit(99), "unknown unit ID is rejected");
+    require(simulation.commandLog().back().kind ==
+                rts::SimulationCommandKind::SelectUnit &&
+            simulation.commandLog().back().unitId == 99,
+            "a failed select by ID still logs that ID");
+
+    require(simulation.selectUnits({3, 1}) == 2,
+            "select units accepts the given IDs");
+    require(simulation.commandLog().back().kind ==
+                rts::SimulationCommandKind::SelectUnits &&
+            simulation.commandLog().back().unitIds.size() == 2 &&
+            simulation.commandLog().back().unitIds[0] == 3 &&
+            simulation.commandLog().back().unitIds[1] == 1,
+            "select units logs the caller ID list in order");
+
+    simulation.clearSelection();
+    require(simulation.moveSelected({4.9375F, 0.0F},
+                                    rts::PathfindingAlgorithm::Dijkstra) == 0,
+            "a move with no selection is still recorded");
+    const auto& move = simulation.commandLog().back();
+    require(move.kind == rts::SimulationCommandKind::Move &&
+            move.algorithm == rts::PathfindingAlgorithm::Dijkstra &&
+            move.destinationMilliX == 4938 &&
+            move.destinationMilliZ == 0,
+            "a move logs the quantized destination and algorithm");
+    require(simulation.lastMoveCommand().requestedDestination.x ==
+                rts::Simulation::worldFromMilliunits(4938) &&
+            simulation.lastMoveCommand().requestedDestination.y == 0.0F,
+            "the recorded move uses the logged destination");
+
+    rts::Simulation replayed(3);
+    rts::Simulation::replay(replayed, simulation.commandLog());
+    require(replayed.stateHash() == simulation.stateHash() &&
+            replayed.commandLog() == simulation.commandLog(),
+            "replaying selection and empty move commands matches");
+
+    rts::Simulation group(4);
+    require(group.selectUnits({1, 2}) == 2, "group replay selects two units");
+    require(group.moveSelected({600.0F, 500.0F}) == 2,
+            "group replay orders both units");
+    require(group.commandLog().back().kind == rts::SimulationCommandKind::Move &&
+            group.commandLog().back().algorithm ==
+                rts::PathfindingAlgorithm::FlowField,
+            "a group order logs the flow-field move");
+    for (int step = 0; step < 5; ++step) {
+        group.step();
+    }
+    rts::Simulation groupReplay(4);
+    rts::Simulation::replay(groupReplay, group.commandLog());
+    require(groupReplay.stateHash() == group.stateHash() &&
+            groupReplay.commandLog() == group.commandLog(),
+            "replaying a group move reproduces the state hash");
+}
+
+void testReplayDivergence() {
+    const auto empty = rts::Simulation::findReplayDivergence(1, {}, {});
+    require(empty.kind == rts::ReplayDivergenceKind::None &&
+            empty.commandIndex == 0 && !empty.beforeCommands &&
+            empty.leftHash == empty.rightHash,
+            "empty command logs match");
+
+    rts::Simulation original(8);
+    require(original.selectUnits({1, 2}) == 2, "divergence scenario selects two units");
+    require(original.moveSelected({600.0F, 500.0F}) == 2,
+            "divergence scenario orders both units");
+    for (int step = 0; step < 3; ++step) {
+        original.step();
+    }
+
+    const auto matched = rts::Simulation::findReplayDivergence(
+        8, original.commandLog(), original.commandLog());
+    require(matched.kind == rts::ReplayDivergenceKind::None &&
+            matched.commandIndex == original.commandLog().size() &&
+            matched.leftHash == original.stateHash() &&
+            matched.leftHash == matched.rightHash,
+            "equal command logs report no divergence");
+
+    auto shorter = original.commandLog();
+    shorter.pop_back();
+    const auto length = rts::Simulation::findReplayDivergence(
+        8, original.commandLog(), shorter);
+    require(length.kind == rts::ReplayDivergenceKind::Command &&
+            length.commandIndex == shorter.size() &&
+            length.leftHash == length.rightHash &&
+            !length.beforeCommands,
+            "a longer command log diverges at the extra command");
+
+    auto altered = original.commandLog();
+    std::size_t moveIndex = altered.size();
+    for (std::size_t index = 0; index < altered.size(); ++index) {
+        if (altered[index].kind == rts::SimulationCommandKind::Move) {
+            moveIndex = index;
+            altered[index].destinationMilliX += 1000;
+            break;
+        }
+    }
+    require(moveIndex < altered.size(), "divergence scenario contains a move");
+    rts::Simulation prefix(8);
+    require(prefix.selectUnits({1, 2}) == 2, "prefix simulation repeats the selection");
+    const auto command = rts::Simulation::findReplayDivergence(
+        8, original.commandLog(), altered);
+    require(command.kind == rts::ReplayDivergenceKind::Command &&
+            command.commandIndex == moveIndex &&
+            command.leftHash == prefix.stateHash() &&
+            command.leftHash == command.rightHash,
+            "a changed move is reported before it is applied");
+}
+
+std::int64_t milliDistanceSquared(rts::Vec2 from, rts::Vec2 to) {
+    const std::int64_t dx = rts::Simulation::worldMilliunits(from.x) -
+        rts::Simulation::worldMilliunits(to.x);
+    const std::int64_t dy = rts::Simulation::worldMilliunits(from.y) -
+        rts::Simulation::worldMilliunits(to.y);
+    return dx * dx + dy * dy;
+}
+
+void testAttackDamagesEnemyInRange() {
+    rts::Simulation simulation(8);
+    const auto range = static_cast<std::int64_t>(rts::Simulation::kAttackRangeMilliunits);
+    require(simulation.units()[0].health == rts::Simulation::kUnitHealth &&
+            simulation.units()[0].alive && simulation.units()[0].team == 0,
+            "units start alive at full health on team 0");
+    require(milliDistanceSquared(simulation.units()[0].position,
+                                  simulation.units()[1].position) <= range * range,
+            "the second starter unit begins inside weapon range");
+    std::uint32_t farId = 0;
+    for (const auto& unit : simulation.units()) {
+        if (unit.id == 1) {
+            continue;
+        }
+        if (milliDistanceSquared(simulation.units()[0].position, unit.position) >
+            range * range) {
+            farId = unit.id;
+            break;
+        }
+    }
+    require(farId != 0, "a starter unit sits beyond weapon range");
+
+    require(simulation.setTeam(2, 1), "an enemy team can be assigned");
+    require(simulation.selectUnit(1), "the attacker can be selected");
+    require(simulation.attackSelected(2) == 1, "the attack order applies to the selection");
+    require(simulation.commandLog().back().kind == rts::SimulationCommandKind::Attack &&
+            simulation.commandLog().back().unitId == 2,
+            "an attack logs the target id");
+
+    for (int tick = 0; tick < 9; ++tick) {
+        simulation.step();
+    }
+    require(simulation.units()[1].alive &&
+            simulation.units()[1].health ==
+                rts::Simulation::kUnitHealth - 9 * rts::Simulation::kAttackDamage,
+            "nine ticks leave the enemy one hit from death");
+    require(simulation.units()[0].health == rts::Simulation::kUnitHealth,
+            "the attacker is not damaged by its own shot");
+    simulation.step();
+    const auto corpse = simulation.units()[1].position;
+    require(!simulation.units()[1].alive && simulation.units()[1].health == 0 &&
+            simulation.units().size() == 8,
+            "zero health removes the unit from play and keeps its vector slot");
+    require(simulation.selectUnits({1, 2}) == 1 &&
+            simulation.units()[0].selected && !simulation.units()[1].selected,
+            "a dead id is omitted from a multi-select");
+    simulation.step();
+    require(simulation.units()[1].health == 0 &&
+            simulation.units()[1].position.x == corpse.x &&
+            simulation.units()[1].position.y == corpse.y,
+            "a dead unit keeps its position and health");
+
+    rts::Simulation replayed(8);
+    rts::Simulation::replay(replayed, simulation.commandLog());
+    require(replayed.stateHash() == simulation.stateHash() &&
+            replayed.commandLog() == simulation.commandLog() &&
+            !replayed.units()[1].alive,
+            "replaying an attack reproduces the casualty");
+
+    auto altered = simulation.commandLog();
+    std::size_t attackIndex = altered.size();
+    for (std::size_t index = 0; index < altered.size(); ++index) {
+        if (altered[index].kind == rts::SimulationCommandKind::Attack) {
+            attackIndex = index;
+            altered[index].unitId = 1;
+            break;
+        }
+    }
+    const auto diverged = rts::Simulation::findReplayDivergence(
+        8, simulation.commandLog(), altered);
+    require(attackIndex < altered.size() &&
+            diverged.kind == rts::ReplayDivergenceKind::Command &&
+            diverged.commandIndex == attackIndex,
+            "a changed attack target is a command divergence");
+
+    rts::Simulation friendly(8);
+    require(friendly.selectUnit(1) && friendly.attackSelected(2) == 1,
+            "a same-team attack order is accepted");
+    friendly.step();
+    require(friendly.units()[1].health == rts::Simulation::kUnitHealth,
+            "units on the same team do not damage each other");
+
+    rts::Simulation distant(8);
+    require(distant.setTeam(farId, 1) && distant.selectUnit(1) &&
+            distant.attackSelected(farId) == 1,
+            "an out-of-range attack order is accepted");
+    distant.step();
+    require(distant.units()[farId - 1].health == rts::Simulation::kUnitHealth,
+            "an attack beyond weapon range deals no damage");
+
+    rts::Simulation idle(2);
+    require(idle.attackSelected(1) == 0 &&
+            idle.commandLog().back().kind == rts::SimulationCommandKind::Attack,
+            "an attack with an empty selection is still logged");
+    require(!idle.setTeam(99, 1), "an unknown unit id rejects the team assignment");
 }
 
 void testSelectionById() {
@@ -190,8 +491,8 @@ void testPathfindingMetrics() {
     require(first.selectUnits({1, 2, 127}) == 3 &&
             second.selectUnits({1, 2, 127}) == 3,
             "metrics scenario selects the same units in both simulations");
-    first.moveSelected({1800.0F, 1300.0F});
-    second.moveSelected({1800.0F, 1300.0F});
+    first.moveSelected({1800.0F, 1300.0F}, rts::PathfindingAlgorithm::AStar);
+    second.moveSelected({1800.0F, 1300.0F}, rts::PathfindingAlgorithm::AStar);
 
     const auto& metrics = first.lastPathfindingMetrics();
     const auto& repeatedMetrics = second.lastPathfindingMetrics();
@@ -209,6 +510,9 @@ void testPathfindingMetrics() {
             first.lastPathfindingMetrics().startCellsExamined == 0 &&
             first.lastPathfindingMetrics().aStarNodesExpanded == 0 &&
             first.lastPathfindingMetrics().dijkstraNodesExpanded == 0 &&
+            first.lastPathfindingMetrics().flowFieldNodesExpanded == 0 &&
+            first.lastPathfindingMetrics().formationPaths == 0 &&
+            first.lastPathfindingMetrics().formationFallbacks == 0 &&
             first.lastPathfindingMetrics().pathCost == 0,
             "pathfinding metrics reset when no units are ordered");
 }
@@ -217,13 +521,13 @@ void testDijkstraMatchesAStarRouteCost() {
     rts::Simulation aStar;
     rts::Simulation dijkstra;
     const std::vector<std::uint32_t> unitIds{1, 127, 400, 1000};
-    require(std::abs(aStar.terrainElevation({700.0F, 470.0F}) -
-                     aStar.terrainElevation({100.0F, 100.0F})) > 10.0F,
+    require(aStar.terrainElevation({380.0F, 650.0F}) -
+                aStar.terrainElevation({100.0F, 100.0F}) > 20.0F,
             "terrain elevation varies across the battlefield");
     require(aStar.selectUnits(unitIds) == unitIds.size() &&
             dijkstra.selectUnits(unitIds) == unitIds.size(),
             "both algorithms select the same units");
-    aStar.moveSelected({1800.0F, 1300.0F});
+    aStar.moveSelected({1800.0F, 1300.0F}, rts::PathfindingAlgorithm::AStar);
     dijkstra.moveSelected({1800.0F, 1300.0F},
                           rts::PathfindingAlgorithm::Dijkstra);
 
@@ -316,12 +620,12 @@ void testElevationEdgeCostsAreReported() {
         }
         require(dx <= 1 && dy <= 1,
                 "elevation route traverses adjacent grid cells");
-        const auto previousElevation =
-            simulation.terrainElevation(cellCenter(previousX, previousY));
-        const auto nextElevation =
-            simulation.terrainElevation(cellCenter(nextX, nextY));
-        const auto elevationCost = static_cast<std::uint64_t>(std::ceil(
-            std::abs(nextElevation - previousElevation) * 50.0F));
+        const auto elevationCost = static_cast<std::uint64_t>(
+            rts::Simulation::elevationTransitionCost(
+                simulation.terrainElevationMilliunits(
+                    cellCenter(previousX, previousY)),
+                simulation.terrainElevationMilliunits(
+                    cellCenter(nextX, nextY))));
         elevationTransitions += elevationCost > 0 ? 1U : 0U;
         expectedCost += (dx != 0 && dy != 0 ? 1414U : 1000U) +
                         elevationCost;
@@ -381,6 +685,10 @@ void testBatchedPathBackend() {
             cpu.units()[0].destination.x == batched.units()[0].destination.x &&
             cpu.units()[0].destination.y == batched.units()[0].destination.y,
             "batched backend routes and reconstructs the same adjacent goal");
+    require(batched.commandLog().size() == 1 &&
+            batched.commandLog().front().kind ==
+                rts::SimulationCommandKind::SelectUnit,
+            "backend move orders stay out of the command log");
 
     backend.invalid = true;
     bool rejected = false;
@@ -392,6 +700,8 @@ void testBatchedPathBackend() {
     require(rejected && batched.lastMoveCommand().unitsRouted == 1 &&
             batched.units()[0].destination.x == cpu.units()[0].destination.x,
             "invalid backend routes are rejected without applying the order");
+    require(batched.commandLog().size() == 1,
+            "a rejected backend route does not enter the command log");
 }
 
 void testScreenRectangleSelection() {
@@ -596,12 +906,265 @@ void testCameraGroundProjectionRoundTrip() {
     }
 }
 
+std::vector<std::uint32_t> leadingUnitIds(std::size_t count) {
+    std::vector<std::uint32_t> ids(count);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        ids[index] = index + 1;
+    }
+    return ids;
+}
+
+rts::Vec2 formationSlot(rts::Vec2 destination, std::size_t count, std::size_t index) {
+    const auto columns = static_cast<std::size_t>(
+        std::ceil(std::sqrt(static_cast<double>(count))));
+    const std::int64_t originX = rts::Simulation::worldMilliunits(destination.x);
+    const std::int64_t originY = rts::Simulation::worldMilliunits(destination.y);
+    const std::int64_t column = static_cast<std::int64_t>(index % columns);
+    const std::int64_t row = static_cast<std::int64_t>(index / columns);
+    const std::int64_t span = static_cast<std::int64_t>(columns - 1);
+    constexpr std::int64_t halfSpacing = 7 * rts::Simulation::kWorldMilliunits;
+    const std::int64_t maxX =
+        static_cast<std::int64_t>(rts::Simulation::kMapWidth) *
+        rts::Simulation::kWorldMilliunits;
+    const std::int64_t maxY =
+        static_cast<std::int64_t>(rts::Simulation::kMapHeight) *
+        rts::Simulation::kWorldMilliunits;
+    const auto clampMilli = [](std::int64_t value, std::int64_t limit) {
+        return static_cast<std::int32_t>(std::clamp(value, std::int64_t{0}, limit));
+    };
+    return {
+        rts::Simulation::worldFromMilliunits(clampMilli(
+            originX + (2 * column - span) * halfSpacing, maxX)),
+        rts::Simulation::worldFromMilliunits(clampMilli(
+            originY + (2 * row - span) * halfSpacing, maxY))
+    };
+}
+
+bool followFormationUntilArrival(rts::Simulation& simulation) {
+    for (int tick = 0; tick < 8000; ++tick) {
+        bool moving = false;
+        for (const auto& unit : simulation.units()) {
+            if (unit.nextWaypoint < unit.path.size()) {
+                moving = true;
+            }
+        }
+        if (!moving) {
+            return true;
+        }
+        simulation.step();
+        for (const auto& unit : simulation.units()) {
+            if (!isTerrainClear(simulation, unit.position) || unit.path.empty()) {
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
+void testSingleUnitOrderStaysOnIndividualAStar() {
+    rts::Simulation flow(1);
+    rts::Simulation astar(1);
+    require(flow.selectUnit(1) && astar.selectUnit(1),
+            "single-unit comparison selects the same unit");
+    flow.moveSelected({1800.0F, 1300.0F});
+    astar.moveSelected({1800.0F, 1300.0F}, rts::PathfindingAlgorithm::AStar);
+    require(flow.lastPathfindingMetrics().flowFieldNodesExpanded == 0 &&
+            flow.lastPathfindingMetrics().formationPaths == 0 &&
+            flow.lastPathfindingMetrics().aStarNodesExpanded ==
+                astar.lastPathfindingMetrics().aStarNodesExpanded &&
+            flow.lastPathfindingMetrics().pathCost ==
+                astar.lastPathfindingMetrics().pathCost &&
+            flow.units()[0].destination.x == astar.units()[0].destination.x &&
+            flow.units()[0].destination.y == astar.units()[0].destination.y &&
+            flow.units()[0].path.size() == astar.units()[0].path.size(),
+            "a one-unit order keeps the individual A* route");
+}
+
+void testFormationFlowField() {
+    constexpr std::size_t count = 16;
+    const auto ids = leadingUnitIds(count);
+    rts::Simulation simulation(count);
+    rts::Simulation repeated(count);
+    require(simulation.selectUnits(ids) == count &&
+            repeated.selectUnits(ids) == count,
+            "formation scenario selects the same group twice");
+    const rts::Vec2 destination{1000.0F, 700.0F};
+    require(simulation.moveSelected(destination) == count &&
+            repeated.moveSelected(destination) == count &&
+            simulation.lastMoveCommand().unitsRouted == count,
+            "formation order routes every selected unit");
+
+    const auto& metrics = simulation.lastPathfindingMetrics();
+    require(metrics.flowFieldNodesExpanded > 0 &&
+            metrics.aStarNodesExpanded == 0 &&
+            metrics.dijkstraNodesExpanded == 0 &&
+            metrics.formationFallbacks == 0 &&
+            metrics.formationPaths == count,
+            "group order uses only the shared flow field");
+    require(metrics.flowFieldNodesExpanded ==
+                repeated.lastPathfindingMetrics().flowFieldNodesExpanded &&
+            metrics.pathCost == repeated.lastPathfindingMetrics().pathCost,
+            "formation routing is deterministic");
+
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto& unit = simulation.units()[index];
+        const auto& again = repeated.units()[index];
+        const auto slot = formationSlot(destination, count, index);
+        require(unit.destination.x == slot.x && unit.destination.y == slot.y,
+                "formation order preserves each unit's slot");
+        require(onMilliunitLattice(unit.destination),
+                "formation slot lies on the milliunit lattice");
+        require(unit.destination.x == again.destination.x &&
+                unit.destination.y == again.destination.y &&
+                unit.path.size() == again.path.size(),
+                "repeated formation orders produce the same routes");
+        require(!unit.path.empty() && unit.path.size() == again.path.size(),
+                "formation unit receives waypoints");
+        rts::Vec2 previous = unit.position;
+        for (std::size_t waypointIndex = 0; waypointIndex < unit.path.size();
+             ++waypointIndex) {
+            const auto waypoint = unit.path[waypointIndex];
+            const auto repeatedWaypoint = again.path[waypointIndex];
+            require(onMilliunitLattice(waypoint),
+                    "formation waypoint lies on the milliunit lattice");
+            require(waypoint.x == repeatedWaypoint.x &&
+                        waypoint.y == repeatedWaypoint.y,
+                    "repeated formation orders produce the same waypoints");
+            require(isTerrainClear(simulation, previous, waypoint),
+                    "formation waypoint segment clears terrain");
+            previous = waypoint;
+        }
+    }
+
+    require(followFormationUntilArrival(simulation),
+            "formation units reach their slots without terrain cancellation");
+    for (const auto& unit : simulation.units()) {
+        require(unit.nextWaypoint == unit.path.size() &&
+                std::abs(unit.position.x - unit.destination.x) < 0.01F &&
+                std::abs(unit.position.y - unit.destination.y) < 0.01F,
+                "formation unit stops on its slot");
+    }
+}
+
+void testFormationRoutesAcrossTerrain() {
+    const auto ids = leadingUnitIds(24);
+    rts::Simulation probe(ids.size());
+    const auto& obstacle = probe.terrainObstacles().front();
+    const std::vector<rts::Vec2> destinations{
+        {520.0F, 350.0F},
+        {1800.0F, 1300.0F},
+        {0.0F, 0.0F},
+        {rts::Simulation::kMapWidth, rts::Simulation::kMapHeight},
+        {(obstacle.minimum.x + obstacle.maximum.x) * 0.5F,
+         (obstacle.minimum.y + obstacle.maximum.y) * 0.5F}
+    };
+    for (const auto destination : destinations) {
+        rts::Simulation simulation(ids.size());
+        require(simulation.selectUnits(ids) == ids.size() &&
+                simulation.moveSelected(destination) == ids.size() &&
+                simulation.lastMoveCommand().unitsRouted == ids.size(),
+                "formation order routes every unit around terrain");
+        require(simulation.lastPathfindingMetrics().formationFallbacks == 0 &&
+                simulation.lastPathfindingMetrics().flowFieldNodesExpanded > 0,
+                "terrain formation order stays on the shared flow field");
+        for (const auto& unit : simulation.units()) {
+            require(isTerrainClear(simulation, unit.destination),
+                    "adjusted formation destination stays outside terrain");
+            rts::Vec2 previous = unit.position;
+            for (const auto waypoint : unit.path) {
+                require(isTerrainClear(simulation, previous, waypoint),
+                        "terrain formation segment stays outside obstacles");
+                previous = waypoint;
+            }
+        }
+        require(followFormationUntilArrival(simulation),
+                "terrain formation units complete their routes");
+        for (const auto& unit : simulation.units()) {
+            require(unit.nextWaypoint == unit.path.size() &&
+                    std::abs(unit.position.x - unit.destination.x) < 0.01F &&
+                    std::abs(unit.position.y - unit.destination.y) < 0.01F,
+                    "terrain formation unit reaches its adjusted slot");
+        }
+    }
+}
+
+void testFormationFlowFieldSearchesLessThanPerUnitAStar() {
+    constexpr std::size_t count = 200;
+    const auto ids = leadingUnitIds(count);
+    rts::Simulation flow(count);
+    rts::Simulation astar(count);
+    require(flow.selectUnits(ids) == count && astar.selectUnits(ids) == count,
+            "search comparison selects the same group");
+    const rts::Vec2 destination{1800.0F, 1300.0F};
+    flow.moveSelected(destination, rts::PathfindingAlgorithm::FlowField);
+    astar.moveSelected(destination, rts::PathfindingAlgorithm::AStar);
+    require(flow.lastMoveCommand().unitsRouted == count &&
+            astar.lastMoveCommand().unitsRouted == count,
+            "both algorithms route the comparison group");
+    const auto flowExpanded = flow.lastPathfindingMetrics().flowFieldNodesExpanded;
+    const auto astarExpanded = astar.lastPathfindingMetrics().aStarNodesExpanded;
+    require(flow.lastPathfindingMetrics().formationFallbacks == 0 &&
+            flowExpanded > 0 && flowExpanded * 2 < astarExpanded,
+            "shared flow field expands fewer nodes than per-unit A* (flow=" +
+                std::to_string(flowExpanded) + ", astar=" +
+                std::to_string(astarExpanded) + ")");
+}
+
+void testRoutePrefersRidgePass() {
+    const rts::Vec2 crest{380.0F, 650.0F};
+    const rts::Vec2 pass{560.0F, 650.0F};
+    rts::Simulation probe(1);
+    const float crestElevation = probe.terrainElevation(crest);
+    const float passElevation = probe.terrainElevation(pass);
+    require(crestElevation - passElevation > 20.0F,
+            "western ridge stands above its pass");
+
+    const auto orderDueNorth = [&](rts::PathfindingAlgorithm algorithm) {
+        rts::Simulation simulation(1);
+        require(simulation.selectUnit(1), "pass scenario selects the lead unit");
+        const auto start = simulation.units()[0].position;
+        require(simulation.moveSelected({start.x, 1000.0F}, algorithm) == 1 &&
+                simulation.lastMoveCommand().unitsRouted == 1,
+                "pass scenario routes the lead unit");
+        float highest = simulation.terrainElevation(start);
+        float farthestEast = start.x;
+        for (const auto point : simulation.units()[0].path) {
+            highest = std::max(highest, simulation.terrainElevation(point));
+            farthestEast = std::max(farthestEast, point.x);
+        }
+        require(farthestEast > start.x + 80.0F,
+                "route shifts east toward the pass (reached x=" +
+                    std::to_string(farthestEast) + ")");
+        require(highest + 15.0F < crestElevation,
+                "route stays below the ridge crest (highest=" +
+                    std::to_string(highest) + ", crest=" +
+                    std::to_string(crestElevation) + ")");
+        return simulation.lastPathfindingMetrics().pathCost;
+    };
+
+    const auto aStarCost = orderDueNorth(rts::PathfindingAlgorithm::AStar);
+    const auto dijkstraCost = orderDueNorth(rts::PathfindingAlgorithm::Dijkstra);
+    require(aStarCost == dijkstraCost && aStarCost > 0,
+            "both searches pay the same cost to use the pass");
+
+    rts::Simulation gentle(1);
+    require(gentle.selectUnit(1), "gentle-slope scenario selects the lead unit");
+    const auto start = gentle.units()[0].position;
+    require(gentle.moveSelected({start.x + 320.0F, start.y},
+                                rts::PathfindingAlgorithm::AStar) == 1,
+            "gentle-slope scenario routes the lead unit");
+    for (const auto point : gentle.units()[0].path) {
+        require(std::abs(point.y - start.y) <= rts::Simulation::kTerrainCellSize,
+                "gentle slope keeps the route on its straight line");
+    }
+}
+
 void testCameraElevatedGroundPicking() {
     rts::Simulation simulation(0);
     rts::Camera3D camera;
     camera.setViewport(1280.0F, 800.0F);
-    camera.focusAt(700.0F, 470.0F);
-    const rts::Vec2 groundPoint{700.0F, 470.0F};
+    camera.focusAt(380.0F, 650.0F);
+    const rts::Vec2 groundPoint{380.0F, 650.0F};
     const rts::WorldPoint elevatedPoint{
         groundPoint.x, simulation.terrainElevation(groundPoint), groundPoint.y};
 
@@ -625,10 +1188,14 @@ void testCameraElevatedGroundPicking() {
 int main() {
     testInitialPopulation();
     testSceneGeometryScaling();
+    testMilliunitMovement();
     testSelectionAndMovement();
     testSelectionMissClearsSelection();
     testMovementStopsAtDestination();
     testDeterministicSimulation();
+    testCommandLogRecordsCallerCommands();
+    testReplayDivergence();
+    testAttackDamagesEnemyInRange();
     testSelectionById();
     testMovementStaysInsideBattlefield();
     testMultiUnitOrderFeedback();
@@ -640,6 +1207,11 @@ int main() {
     testScreenRectangleSelection();
     testTerrainAwarePathfinding();
     testRouteQualityAcrossDestinations();
+    testSingleUnitOrderStaysOnIndividualAStar();
+    testFormationFlowField();
+    testFormationRoutesAcrossTerrain();
+    testFormationFlowFieldSearchesLessThanPerUnitAStar();
+    testRoutePrefersRidgePass();
     testCameraGroundProjectionRoundTrip();
     testCameraElevatedGroundPicking();
     std::cout << "All simulation tests passed.\n";

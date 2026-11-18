@@ -11,6 +11,7 @@ dependencies = ["mcp==1.26.0", "anyio>=4.5"]
 
 [project.scripts]
 total-supremacy-mcp = "totalsupremacy_mcp.server:main"
+total-supremacy-playtest = "totalsupremacy_mcp.scenarios:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

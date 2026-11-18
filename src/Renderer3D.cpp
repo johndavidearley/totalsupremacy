@@ -427,6 +427,32 @@ struct Renderer3D::Impl {
         }
     }
 
+    bool preferredExtent(std::uint32_t& width, std::uint32_t& height) const {
+        VkSurfaceCapabilitiesKHR capabilities{};
+        if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                physicalDevice, surface, &capabilities) != VK_SUCCESS) {
+            return false;
+        }
+        if (capabilities.currentExtent.width !=
+            std::numeric_limits<std::uint32_t>::max()) {
+            width = capabilities.currentExtent.width;
+            height = capabilities.currentExtent.height;
+        } else {
+            int framebufferWidth = 0;
+            int framebufferHeight = 0;
+            glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
+            width = std::clamp(
+                static_cast<std::uint32_t>(std::max(0, framebufferWidth)),
+                capabilities.minImageExtent.width,
+                capabilities.maxImageExtent.width);
+            height = std::clamp(
+                static_cast<std::uint32_t>(std::max(0, framebufferHeight)),
+                capabilities.minImageExtent.height,
+                capabilities.maxImageExtent.height);
+        }
+        return width > 0 && height > 0;
+    }
+
     void createSwapchain() {
         VkSurfaceCapabilitiesKHR capabilities{};
         check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface,
@@ -462,19 +488,8 @@ struct Renderer3D::Impl {
             presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
         }
 
-        if (capabilities.currentExtent.width !=
-            std::numeric_limits<std::uint32_t>::max()) {
-            extent = capabilities.currentExtent;
-        } else {
-            int width = 0;
-            int height = 0;
-            glfwGetFramebufferSize(window, &width, &height);
-            extent.width = std::clamp(static_cast<std::uint32_t>(std::max(0, width)),
-                                      capabilities.minImageExtent.width,
-                                      capabilities.maxImageExtent.width);
-            extent.height = std::clamp(static_cast<std::uint32_t>(std::max(0, height)),
-                                       capabilities.minImageExtent.height,
-                                       capabilities.maxImageExtent.height);
+        if (!preferredExtent(extent.width, extent.height)) {
+            throw std::runtime_error("Vulkan surface has no drawable extent.");
         }
         std::uint32_t imageCount = capabilities.minImageCount + 1;
         if (capabilities.maxImageCount > 0) {
@@ -911,7 +926,10 @@ struct Renderer3D::Impl {
 
         if (frame.gpuTimestampQueries != VK_NULL_HANDLE) {
             vkCmdResetQueryPool(frame.command, frame.gpuTimestampQueries, 0, 2);
-            vkCmdWriteTimestamp(frame.command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            // Color-output matches the image-available wait. Top-of-pipe
+            // would include that stall on drivers that honor the stage.
+            vkCmdWriteTimestamp(frame.command,
+                                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                 frame.gpuTimestampQueries, 0);
         }
         std::array<VkClearValue, 2> clearValues{};
@@ -963,6 +981,16 @@ struct Renderer3D::Impl {
         check(vkEndCommandBuffer(frame.command), "End Vulkan command buffer");
     }
 
+    double timestampIntervalMilliseconds(std::uint64_t begin,
+                                         std::uint64_t end) const {
+        const std::uint32_t validBits = graphicsTimestampValidBits;
+        const std::uint64_t difference = validBits >= 64
+            ? end - begin
+            : (end - begin) & ((std::uint64_t{1} << validBits) - 1);
+        return static_cast<double>(difference) * timestampPeriodNanoseconds /
+               1.0e6;
+    }
+
     void readGpuTimestamps(Frame& frame) {
         if (!frame.gpuTimestampPending ||
             frame.gpuTimestampQueries == VK_NULL_HANDLE) {
@@ -974,13 +1002,8 @@ struct Renderer3D::Impl {
                                     sizeof(std::uint64_t),
                                     VK_QUERY_RESULT_64_BIT),
               "Read completed GPU timestamps");
-        const std::uint32_t validBits = graphicsTimestampValidBits;
-        const std::uint64_t difference = validBits >= 64
-            ? timestamps[1] - timestamps[0]
-            : (timestamps[1] - timestamps[0]) &
-                  ((std::uint64_t{1} << validBits) - 1);
         frameStats.gpuRenderMilliseconds =
-            static_cast<double>(difference) * timestampPeriodNanoseconds / 1.0e6;
+            timestampIntervalMilliseconds(timestamps[0], timestamps[1]);
         frameStats.gpuTimingFrame = frame.submittedFrame;
         frameStats.gpuRenderTimingValid = true;
         frame.gpuTimestampPending = false;
@@ -988,14 +1011,12 @@ struct Renderer3D::Impl {
 
     void draw(const Simulation& simulation, const Camera3D& camera,
               const ScreenRectangle* selectionRectangle) {
-        int width = 0;
-        int height = 0;
-        glfwGetFramebufferSize(window, &width, &height);
-        if (width <= 0 || height <= 0) {
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        if (!preferredExtent(width, height)) {
             return;
         }
-        if (static_cast<std::uint32_t>(width) != extent.width ||
-            static_cast<std::uint32_t>(height) != extent.height) {
+        if (width != extent.width || height != extent.height) {
             recreateSwapchain();
         }
 
@@ -1142,6 +1163,19 @@ Renderer3D::~Renderer3D() = default;
 void Renderer3D::draw(const Simulation& simulation, const Camera3D& camera,
                       const ScreenRectangle* selectionRectangle) {
     impl_->draw(simulation, camera, selectionRectangle);
+}
+
+bool Renderer3D::drawableSize(int& width, int& height) const {
+    std::uint32_t drawableWidth = 0;
+    std::uint32_t drawableHeight = 0;
+    if (!impl_->preferredExtent(drawableWidth, drawableHeight)) {
+        width = 0;
+        height = 0;
+        return false;
+    }
+    width = static_cast<int>(drawableWidth);
+    height = static_cast<int>(drawableHeight);
+    return true;
 }
 
 RendererStats Renderer3D::stats() const noexcept {

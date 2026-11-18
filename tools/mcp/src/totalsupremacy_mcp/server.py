@@ -54,7 +54,7 @@ def create_server(session: GameSession) -> FastMCP:
 
     @server.tool(annotations=read_only)
     async def get_game_state() -> dict[str, Any]:
-        """Read tick, selection, latest move-routing feedback, pause, and camera state."""
+        """Read tick, authoritative state hash, selection, move feedback, pause, and camera."""
         if not session.running:
             return {"running": False, "server_version": __version__}
         return {**await session.request("state"), "running": True}
@@ -69,7 +69,7 @@ def create_server(session: GameSession) -> FastMCP:
         offset: Annotated[int, Field(ge=0)] = 0,
         limit: Annotated[int, Field(ge=1, le=128)] = 64,
     ) -> dict[str, Any]:
-        """Read a page of units with positions, destinations, path counts, and selection."""
+        """Read a page of units with positions, health, team, path counts, and selection."""
         return await session.request(f"units {offset} {limit}")
 
     @server.tool(annotations=local_action)
@@ -104,8 +104,23 @@ def create_server(session: GameSession) -> FastMCP:
         return await session.request(f"move {x:.7g} {z:.7g}")
 
     @server.tool(annotations=local_action)
+    async def set_team(
+        unit_id: Annotated[int, Field(ge=1, le=UINT32_MAX)],
+        team: Annotated[int, Field(ge=0, le=255)],
+    ) -> dict[str, Any]:
+        """Assign a unit to a team. Units damage only other teams."""
+        return await session.request(f"set_team {unit_id} {team}")
+
+    @server.tool(annotations=local_action)
+    async def attack_selected(
+        target_id: Annotated[int, Field(ge=0, le=UINT32_MAX)] = 0,
+    ) -> dict[str, Any]:
+        """Order selected units to attack a unit. A target of 0 clears the order."""
+        return await session.request(f"attack {target_id}")
+
+    @server.tool(annotations=local_action)
     async def set_paused(paused: bool) -> dict[str, Any]:
-        """Pause or resume real-time simulation."""
+        """Set the pause flag. MCP time still advances only through advance_ticks."""
         return await session.request(f"pause {1 if paused else 0}")
 
     @server.tool(annotations=local_action)

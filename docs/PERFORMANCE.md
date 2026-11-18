@@ -14,9 +14,11 @@ generated vertex count. It separately displays CPU vertex-buffer upload and
 command-buffer recording time, plus GPU render-pass time when Vulkan graphics
 queue timestamps are supported. GPU timestamps are collected asynchronously
 after the corresponding frame fence completes and can lag the current frame.
-The GPU measurement covers the render pass, not presentation or display
-latency. CPU geometry build, upload, and command recording exclude GPU
-execution; values are local observations, not benchmark claims. Geometry for
+The GPU render-pass measurement starts at color-attachment output, the same
+stage as the swapchain-image wait, and ends at the bottom of the pipe. It is
+not presentation or display latency. CPU geometry build, upload, and command
+recording exclude GPU execution; values are local observations, not
+benchmark claims. Geometry for
 the battlefield is submitted in batched Vulkan draws with depth testing. There
 is no automated timing threshold in the test suite.
 
@@ -38,8 +40,9 @@ planning is excluded from the frame measurements.
 
 Output includes scene-build, host-visible vertex upload, and CPU command-record
 median/p95 times, plus asynchronous Vulkan timestamp median/p95 for the
-render-pass command interval. GPU results are collected after their frame
-fences and are not presentation latency or display time. Resize, driver,
+render pass. GPU results are collected after their frame fences and are not
+presentation latency or display time. The drawable size is the Vulkan surface
+extent when the surface defines one. Resize, driver,
 window/compositor, and power settings can affect the measurements; compare only
 runs with matching swapchain size and hardware.
 
@@ -59,9 +62,9 @@ MoltenVK 1.4.2, Intel Iris Plus Graphics 655, 1440x900 swapchain) produced:
 | 1,800 | Unselected | 1.964 / 2.475 | 0.427 / 0.552 | 0.011 / 0.015 | 2.276 / 7.832 |
 | 1,800 | 100 selected | 3.435 / 4.163 | 0.534 / 0.649 | 0.010 / 0.013 | 2.371 / 8.006 |
 
-This is a local baseline, not a performance budget. GPU p95 spikes are visible
-despite much lower medians; repeat on target hardware before setting a frame
-budget or changing rendering strategy.
+This is a local baseline, not a performance budget. Its GPU p95 column is
+several times the median. That run rebuilt the swapchain on every frame; the
+corrected measurement is in "Stable swapchain render pass" below.
 
 #### Live renderer with elevated terrain
 
@@ -81,6 +84,41 @@ This is one local run, not a controlled comparison with the earlier flat
 terrain capture; GPU timing varies between runs. CPU scene construction and
 upload increased with the tessellated mesh, while command-recording time
 remained nearly unchanged. The GPU timestamp covers the render pass only.
+This run also rebuilt the swapchain every frame, so its GPU tail is not a
+render-pass cost.
+
+### Stable swapchain render pass
+
+On this Retina display, GLFW reported a 2880×1800 framebuffer for the
+1440×900 window while the Vulkan surface extent stayed 1440×900. The renderer
+treated that disagreement as a resize, called `vkDeviceWaitIdle`, and rebuilt
+the swapchain, render pass, and pipelines on all 2,221 benchmark frames.
+MoltenVK 1.4.2 also wrote the same timestamp for top-of-pipe and
+color-attachment output, so moving the query stage did not remove the tail.
+
+The drawable size is now the surface extent when Vulkan defines one. The host
+sizes the camera and pointer from that size. A repeat of the same Release
+benchmark created the swapchain once. GPU p95 sits within about 0.06 ms of
+the median. The pass itself is under 1 ms. CPU scene construction is the
+larger frame cost:
+
+| Units | Mode | Scene median/p95 (ms) | Upload median/p95 (ms) | Commands median/p95 (ms) | GPU pass median/p95 (ms) |
+|---:|---|---:|---:|---:|---:|
+| 250 | Unselected | 1.790 / 2.135 | 0.206 / 0.239 | 0.012 / 0.013 | 0.486 / 0.524 |
+| 250 | 100 selected | 3.240 / 3.637 | 0.331 / 0.401 | 0.011 / 0.013 | 0.558 / 0.605 |
+| 500 | Unselected | 2.779 / 3.060 | 0.236 / 0.268 | 0.012 / 0.013 | 0.521 / 0.569 |
+| 500 | 100 selected | 3.308 / 3.945 | 0.375 / 0.439 | 0.010 / 0.013 | 0.586 / 0.639 |
+| 1,000 | Unselected | 3.239 / 3.618 | 0.358 / 0.419 | 0.011 / 0.014 | 0.572 / 0.607 |
+| 1,000 | 100 selected | 5.300 / 5.850 | 0.480 / 0.536 | 0.011 / 0.012 | 0.638 / 0.701 |
+| 1,500 | Unselected | 3.794 / 4.302 | 0.453 / 0.511 | 0.011 / 0.012 | 0.630 / 0.673 |
+| 1,500 | 100 selected | 5.720 / 6.342 | 0.596 / 0.651 | 0.011 / 0.012 | 0.701 / 0.741 |
+| 1,800 | Unselected | 5.537 / 5.890 | 0.518 / 0.559 | 0.011 / 0.012 | 0.673 / 0.731 |
+| 1,800 | 100 selected | 6.407 / 6.704 | 0.665 / 0.707 | 0.011 / 0.012 | 0.745 / 0.794 |
+
+Same machine, MoltenVK 1.4.2, Intel Iris Plus Graphics 655, 1440×900
+swapchain, 180 GPU samples per case. This is not a frame budget. The 1,800-unit
+selected scene-build median is 6.407 ms and does not by itself justify a
+rendering change.
 
 ## Headless simulation benchmark
 
@@ -100,12 +138,18 @@ route planning is excluded from step timing.
 
 CSV output includes compiler, build type, logical thread count, workload
 settings, median and p95 route latency, mean goal- and start-cell lookups per
-unit, mean expanded nodes per unit, mean integer path cost per unit, median and
-p95 per-tick simulation latency, and a position checksum to confirm the
-workload advanced. Each route scenario runs with both A* and Dijkstra over the
-same deterministic unit formations. The simulation API exposes these work
-counters for the most recent move command; they do not alter the MCP protocol.
-All units must route or the benchmark exits with an error.
+unit, mean expanded nodes per unit, the fraction of units placed on a shared
+formation path or an individual-search fallback, mean integer path cost per
+unit, median and p95 per-tick simulation latency, and a position checksum to
+confirm the workload advanced. Each route scenario runs with A*, Dijkstra, and
+the group flow field over the same deterministic unit formations. Flow-field
+expansions are the single shared search divided by the unit count. Its path
+cost is the installed polyline's geometric plus elevation travel cost, so it
+is not an A* optimality claim. The step columns follow one far-corner group
+order using the default flow-field router; they repeat on every algorithm row.
+The simulation API exposes these work counters for the most recent move
+command; they do not alter the MCP protocol. All units must route or the
+benchmark exits with an error.
 
 The simulation regression suite also checks route geometry and completion for
 four starting units (including a blocked-cell start) against nearby, center,
@@ -139,7 +183,8 @@ map-edge, and obstacle-interior checks. Every route is checked against CPU A*
 for its individual integer grid cost and routed destination; malformed,
 blocked, or corner-cutting GPU paths are rejected. A failure exits nonzero.
 The benchmark runs without a window and requires a Vulkan compute device.
-Regular gameplay and MCP orders continue to use CPU A*.
+Regular gameplay and MCP group orders use the shared CPU flow field. One-unit
+orders and this benchmark's CPU reference still use A*.
 
 The GPU version executes one serial A* search per shader invocation in
 synchronous batches of 32. Reported command latency includes CPU start/goal
@@ -163,9 +208,82 @@ One Release run on Intel Iris Plus Graphics 655 with MoltenVK 1.4.2 produced:
 | 1,800 | Far corner | 84.902 | 1,109.699 |
 
 These are local measurements with three trials per case. This particular
-per-unit implementation is substantially slower than CPU A* on this device;
-it does not rule out different GPU algorithms, larger batches, other hardware,
-or shared flow fields.
+per-unit implementation is substantially slower than CPU A* on this device.
+Group orders now use a shared CPU flow field instead. Another per-unit GPU
+search is not the next pathfinding step; a later GPU experiment would have to
+beat the shared CPU field below.
+
+### Formation flow field
+
+The headless benchmark's third algorithm is the group router. The table below
+is the gentle-hill terrain, before the pass retune in the next section. One
+Release run on the local Intel macOS machine (Apple Clang 17, 8 logical
+threads, five trials) compared it with per-unit A* on the same orders. Every
+flow-field case routed all selected units on formation paths, with no
+individual-search fallback.
+
+| Units | Scenario | A* median (ms) | Flow median (ms) | A* nodes/unit | Flow nodes/unit | A* path cost | Flow path cost |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 250 | Nearby | 2.276 | 1.712 | 44.392 | 14.912 | 20,157.864 | 22,647.548 |
+| 250 | Center | 3.555 | 2.079 | 71.628 | 16.820 | 26,661.592 | 28,655.728 |
+| 250 | Far corner | 22.315 | 4.677 | 458.964 | 24.676 | 74,174.036 | 77,176.140 |
+| 1,000 | Nearby | 16.512 | 7.408 | 84.013 | 4.608 | 26,716.728 | 29,407.509 |
+| 1,000 | Center | 8.406 | 4.205 | 39.153 | 4.205 | 18,012.894 | 19,026.790 |
+| 1,000 | Far corner | 61.395 | 15.103 | 323.411 | 6.169 | 64,228.646 | 69,115.832 |
+| 1,800 | Nearby | 47.630 | 15.251 | 140.506 | 3.284 | 37,195.323 | 41,461.626 |
+| 1,800 | Center | 23.255 | 8.463 | 58.844 | 2.971 | 20,330.638 | 21,558.831 |
+| 1,800 | Far corner | 79.325 | 26.004 | 241.819 | 3.427 | 56,041.441 | 61,316.877 |
+
+The 1,800-unit far-corner flow-field p95 was 26.531 ms. The same population's
+per-tick simulation median, after that group order, was 0.061 ms. Dijkstra
+remains the slow per-unit comparison; its 1,800-unit far-corner median was
+941.511 ms with the same grid cost as A*. These are local observations, not
+performance budgets. On this terrain the flow-field travel cost sat about
+6–12% above the per-unit grid cost because units follow the shared formation
+corridor.
+
+### Pass-weighted elevation
+
+The current heightfield is a low base, two broad rises, and a western ridge
+from x=160 to x=1100 at z=650 with a pass at x=560. Grid edges add
+`ceil(abs(heightChange) * 180)`. The lead unit, ordered due north from the
+starting formation, routes through that pass and stays below the crest. A
+gentle eastward order stays on the straight line. A* and Dijkstra still match
+on cost. Elevation still does not change unit speed or block steep ground.
+
+One Release run with the same host, compiler, and five route trials produced:
+
+| Units | Scenario | A* median (ms) | Flow median (ms) | A* nodes/unit | Flow nodes/unit | A* path cost | Flow path cost |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 250 | Nearby | 2.482 | 1.743 | 50.848 | 14.532 | 20,155.392 | 22,221.036 |
+| 250 | Center | 7.953 | 2.065 | 179.556 | 17.768 | 31,449.588 | 36,546.560 |
+| 250 | Far corner | 17.020 | 4.546 | 405.672 | 24.236 | 73,408.748 | 78,397.188 |
+| 1,000 | Nearby | 21.939 | 6.123 | 115.013 | 4.457 | 27,900.468 | 31,568.645 |
+| 1,000 | Center | 10.853 | 4.230 | 52.882 | 4.442 | 19,736.965 | 22,050.638 |
+| 1,000 | Far corner | 58.377 | 14.891 | 352.496 | 6.059 | 63,828.127 | 69,617.307 |
+| 1,800 | Nearby | 84.427 | 16.768 | 247.558 | 3.275 | 39,238.633 | 48,838.996 |
+| 1,800 | Center | 20.712 | 7.959 | 60.095 | 2.988 | 20,907.688 | 22,918.246 |
+| 1,800 | Far corner | 95.830 | 25.600 | 328.706 | 3.366 | 55,702.025 | 61,879.335 |
+
+Every flow-field case again used a formation path for every unit and recorded
+no individual-search fallback. The 1,800-unit far-corner flow-field p95 was
+26.171 ms. Dijkstra's 1,800-unit far-corner median was 942.940 ms with the
+same grid cost as A*. Formation travel cost on center and far-corner orders
+was about 7–16% above per-unit A*. Nearby orders were about 10–25% above,
+because much of a large formation starts north of the ridge while the
+destination is south of it. These remain local observations, not performance
+budgets. The 1,800-unit far-corner group order is 25.600 ms median.
+
+Movement, path construction, and elevation now use integer arithmetic. The
+table above is the libm heightfield. A later Release run on the same host,
+after heights became integer milli-heights, kept A* and Dijkstra on one shared
+cost. For the 1,800-unit far-corner order that cost is 55,682.465, with
+328.706 A* expansions per unit replaced by 166.437. The flow-field cost is
+61,844.747, still one formation path per unit and no individual fallback, at
+3.367 expanded nodes per unit. The step median for that order is 0.128 ms,
+the p95 is 0.131 ms, and the position checksum is 3353087934. Route medians
+from that run differed by noise and do not replace the table. These are local
+observations, not a budget.
 
 ### Headless CPU scene-geometry benchmark
 
@@ -328,11 +446,12 @@ observations, not performance targets.
 
 ### Elevation-aware pathfinding and terrain geometry
 
-The simulation now uses a deterministic heightfield sampled at the 20-unit
+This run introduced a deterministic heightfield sampled at the 20-unit
 terrain-grid vertices and bilinearly interpolated for ground placement and
-rendering. Each traversable grid edge adds
-`ceil(abs(heightChange) * 50)` integer cost units to its existing orthogonal
-or diagonal movement cost. The A* heuristic adds the corresponding floor of
+rendering. The heightfield was three broad hills. Each traversable grid edge
+added `ceil(abs(heightChange) * 50)` integer cost units to its existing
+orthogonal or diagonal movement cost. The current weight and ridge are in
+"Pass-weighted elevation" above. The A* heuristic adds the corresponding floor of
 the unavoidable current-to-goal elevation change to the octile distance; this
 remains a lower bound with the rounded edge costs. Dijkstra uses a zero
 heuristic. Regression tests verify elevation varies, both algorithms agree on
