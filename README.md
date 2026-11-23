@@ -105,7 +105,7 @@ In an MCP client configuration, register a stdio server with command
 `/absolute/path/to/.venv/bin/total-supremacy-mcp` and argument
 `--game-executable /absolute/path/to/build/TotalSupremacy`. The tools launch
 and stop the game, inspect paginated unit state, select one or multiple units,
-issue move and attack orders, assign teams, inspect routing feedback,
+issue move and attack orders, queue a follow-up order, assign teams and archetypes, inspect routing feedback,
 pause/resume, advance exact ticks, and set the 3D camera. The `state` result includes `state_hash`, the decimal
 FNV-1a 64-bit hash of authoritative gameplay. Camera pose and the pause flag
 are not part of that hash. No network

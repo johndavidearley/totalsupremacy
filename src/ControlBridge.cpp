@@ -31,6 +31,7 @@ std::string stateResponse(const Simulation& simulation, const Camera3D& camera,
            << "{\"ok\":true,\"result\":{\"tick\":" << simulation.tickCount()
            << ",\"state_hash\":" << simulation.stateHash()
            << ",\"unit_count\":" << simulation.units().size()
+           << ",\"projectile_count\":" << simulation.projectiles().size()
            << ",\"selected_count\":" << simulation.selectedCount()
            << ",\"paused\":" << (paused ? "true" : "false")
            << ",\"last_move\":{\"valid\":"
@@ -117,9 +118,12 @@ std::string ControlBridge::execute(const std::string& request, Simulation& simul
                    << (unit.path.size() - unit.nextWaypoint)
                    << ",\"selected\":" << (unit.selected ? "true" : "false")
                    << ",\"team\":" << static_cast<unsigned>(unit.team)
+                   << ",\"archetype\":" << static_cast<unsigned>(unit.archetype)
                    << ",\"health\":" << unit.health
                    << ",\"alive\":" << (unit.alive ? "true" : "false")
-                   << ",\"attack_target\":" << unit.attackTarget << '}';
+                   << ",\"attack_target\":" << unit.attackTarget
+                   << ",\"attack_cooldown\":" << unit.attackCooldown
+                   << ",\"order_count\":" << unit.orders.size() << '}';
         }
         result << "]}}";
         return result.str();
@@ -204,6 +208,43 @@ std::string ControlBridge::execute(const std::string& request, Simulation& simul
         if (!simulation.setTeam(static_cast<std::uint32_t>(id),
                                 static_cast<std::uint8_t>(team))) {
             return error("unit id was not found");
+        }
+        return stateResponse(simulation, camera, paused);
+    }
+    if (command == "set_archetype") {
+        unsigned long long id = 0;
+        unsigned long long archetype = 0;
+        if (!(stream >> id >> archetype) || !noExtraArguments(stream) || id == 0 ||
+            id > static_cast<unsigned long long>(UINT32_MAX) || archetype > 1U) {
+            return error("set_archetype requires a unit id and an archetype of 0 or 1");
+        }
+        if (!simulation.setArchetype(static_cast<std::uint32_t>(id),
+                                     static_cast<UnitArchetype>(archetype))) {
+            return error("unit id was not found");
+        }
+        return stateResponse(simulation, camera, paused);
+    }
+    if (command == "queue_move") {
+        float x = 0.0F;
+        float z = 0.0F;
+        if (!(stream >> x >> z) || !noExtraArguments(stream) || !std::isfinite(x) ||
+            !std::isfinite(z) || x < 0.0F || x > Simulation::kMapWidth ||
+            z < 0.0F || z > Simulation::kMapHeight) {
+            return error("queue_move coordinates must be within the battlefield");
+        }
+        if (simulation.moveSelected({x, z}, PathfindingAlgorithm::FlowField, true) == 0) {
+            return error("select one or more units before queueing a move");
+        }
+        return stateResponse(simulation, camera, paused);
+    }
+    if (command == "queue_attack") {
+        unsigned long long target = 0;
+        if (!(stream >> target) || !noExtraArguments(stream) ||
+            target > static_cast<unsigned long long>(UINT32_MAX)) {
+            return error("queue_attack requires a target unit id");
+        }
+        if (simulation.attackSelected(static_cast<std::uint32_t>(target), true) == 0) {
+            return error("select one or more units before queueing an attack");
         }
         return stateResponse(simulation, camera, paused);
     }

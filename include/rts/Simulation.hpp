@@ -7,9 +7,40 @@
 
 namespace rts {
 
+enum class UnitArchetype : std::uint8_t {
+    Infantry = 0,
+    Ranger = 1,
+};
+
+enum class UnitOrderKind : std::uint8_t {
+    Move = 1,
+    Attack = 2,
+};
+
+// A deferred order. The destination is the formation slot in milliunits.
+// A queued move routes with A* when it starts.
+struct UnitOrder {
+    UnitOrderKind kind = UnitOrderKind::Move;
+    std::int32_t destinationMilliX = 0;
+    std::int32_t destinationMilliZ = 0;
+    std::uint32_t targetId = 0;
+    std::uint8_t algorithm = 0;
+};
+
 struct Vec2 {
     float x = 0.0F;
     float y = 0.0F;
+};
+
+// A shot in flight. Position is milliunits. Damage and team are fixed
+// when the weapon fires.
+struct Projectile {
+    std::uint32_t id = 0;
+    std::int32_t x = 0;
+    std::int32_t z = 0;
+    std::uint32_t targetId = 0;
+    std::int32_t damage = 0;
+    std::uint8_t team = 0;
 };
 
 struct Unit {
@@ -20,9 +51,13 @@ struct Unit {
     std::size_t nextWaypoint = 0;
     bool selected = false;
     std::uint8_t team = 0;
+    UnitArchetype archetype = UnitArchetype::Infantry;
     std::int32_t health = 100;
     std::uint32_t attackTarget = 0;
+    // Ticks remaining until the next shot. Zero means the weapon is ready.
+    std::int32_t attackCooldown = 0;
     bool alive = true;
+    std::vector<UnitOrder> orders;
 };
 
 struct TerrainObstacle {
@@ -57,6 +92,7 @@ enum class SimulationCommandKind : std::uint8_t {
     Step = 5,
     SetTeam = 6,
     Attack = 7,
+    SetArchetype = 8,
 };
 
 struct SimulationCommand {
@@ -66,6 +102,8 @@ struct SimulationCommand {
     std::int32_t destinationMilliX = 0;
     std::int32_t destinationMilliZ = 0;
     std::uint8_t team = 0;
+    std::uint8_t archetype = 0;
+    bool append = false;
     PathfindingAlgorithm algorithm = PathfindingAlgorithm::FlowField;
 
     bool operator==(const SimulationCommand&) const = default;
@@ -145,10 +183,34 @@ public:
         static_cast<float>(kElevationCostPerHeightUnit);
     static constexpr int kTerrainColumns =
         static_cast<int>(kMapWidth / kTerrainCellSize);
-    // One infantry archetype. Damage is applied after movement on the same tick.
+    // Starter units are infantry. Rangers have less health, less damage, a
+    // longer range, and a slower shot. Both move at kMilliunitsPerTick.
+    // A ready weapon fires after movement. The shot then travels at
+    // kProjectileMilliunitsPerTick and damages its target on arrival.
     static constexpr std::int32_t kUnitHealth = 100;
     static constexpr std::int32_t kAttackDamage = 10;
     static constexpr std::int32_t kAttackRangeMilliunits = 40 * kWorldMilliunits;
+    static constexpr std::int32_t kAttackCooldownTicks = 10;
+    static constexpr std::int32_t kRangerHealth = 70;
+    static constexpr std::int32_t kRangerDamage = 6;
+    static constexpr std::int32_t kRangerRangeMilliunits = 70 * kWorldMilliunits;
+    static constexpr std::int32_t kRangerCooldownTicks = 20;
+    static constexpr std::int32_t kProjectileMilliunitsPerTick = 8 * kWorldMilliunits;
+
+    static constexpr std::int32_t archetypeHealth(UnitArchetype archetype) noexcept {
+        return archetype == UnitArchetype::Ranger ? kRangerHealth : kUnitHealth;
+    }
+    static constexpr std::int32_t archetypeDamage(UnitArchetype archetype) noexcept {
+        return archetype == UnitArchetype::Ranger ? kRangerDamage : kAttackDamage;
+    }
+    static constexpr std::int32_t archetypeRange(UnitArchetype archetype) noexcept {
+        return archetype == UnitArchetype::Ranger ? kRangerRangeMilliunits
+                                                  : kAttackRangeMilliunits;
+    }
+    static constexpr std::int32_t archetypeCooldown(UnitArchetype archetype) noexcept {
+        return archetype == UnitArchetype::Ranger ? kRangerCooldownTicks
+                                                  : kAttackCooldownTicks;
+    }
     static constexpr int kTerrainRows =
         static_cast<int>(kMapHeight / kTerrainCellSize);
 
@@ -171,16 +233,26 @@ public:
     bool selectUnit(std::uint32_t id);
     std::size_t selectUnits(const std::vector<std::uint32_t>& ids);
     void clearSelection();
+    // append keeps the current order and runs this one after it. An idle
+    // unit starts the appended order immediately.
     std::size_t moveSelected(
         Vec2 destination,
-        PathfindingAlgorithm algorithm = PathfindingAlgorithm::FlowField);
+        PathfindingAlgorithm algorithm = PathfindingAlgorithm::FlowField,
+        bool append = false);
     std::size_t moveSelected(Vec2 destination, GridPathBackend& backend);
     // Logs the assignment even when the id is unknown.
     bool setTeam(std::uint32_t id, std::uint8_t team);
-    // Orders each selected living unit to attack targetId. Zero clears the order.
-    std::size_t attackSelected(std::uint32_t targetId);
+    // Logs the assignment even when the id is unknown. Health is clamped
+    // down to the new maximum and is not restored by a later change.
+    bool setArchetype(std::uint32_t id, UnitArchetype archetype);
+    // Orders each selected living unit to attack targetId. Zero clears the
+    // order. A living enemy beyond range gets an A* chase. append keeps the
+    // current order and runs the attack after it. An immediate move or
+    // attack clears the queue.
+    std::size_t attackSelected(std::uint32_t targetId, bool append = false);
 
     const std::vector<Unit>& units() const noexcept { return units_; }
+    const std::vector<Projectile>& projectiles() const noexcept { return projectiles_; }
     const std::vector<TerrainObstacle>& terrainObstacles() const noexcept {
         return terrainObstacles_;
     }
@@ -211,7 +283,14 @@ public:
 private:
     void clearSelectedFlags() noexcept;
     Unit* findUnit(std::uint32_t id) noexcept;
+    bool withinAttackRange(const Unit& attacker, Vec2 target) const noexcept;
+    bool orderInProgress(const Unit& unit);
+    void beginOrder(Unit& unit, const UnitOrder& order);
+    void advanceOrders();
+    void refreshChase(Unit& attacker);
+    void advanceProjectiles();
     void resolveAttacks();
+    void applyDamage(const std::vector<std::int32_t>& damage);
     struct PreparedPath {
         Vec2 start;
         Vec2 requestedDestination;
@@ -251,6 +330,8 @@ private:
     void routeFormation(Vec2 destination, std::size_t columns);
 
     std::vector<Unit> units_;
+    std::vector<Projectile> projectiles_;
+    std::uint32_t nextProjectileId_ = 1;
     std::vector<TerrainObstacle> terrainObstacles_;
     std::vector<std::uint8_t> blockedPathCells_;
     std::vector<std::int32_t> terrainVertexElevationMilliunits_;

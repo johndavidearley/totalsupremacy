@@ -35,12 +35,15 @@ def main() -> int:
     try:
         state = request("state")
         assert state["unit_count"] == 1000
+        assert state["projectile_count"] == 0
         assert state["tick"] == 0
         assert state["paused"] is True
 
         page = request("units 0 2")
         assert page["total"] == 1000
         assert [unit["id"] for unit in page["units"]] == [1, 2]
+        assert page["units"][0]["order_count"] == 0
+        assert page["units"][0]["attack_cooldown"] == 0
 
         state = request("select_units 2 1 2")
         assert state["selected_count"] == 2
@@ -71,6 +74,28 @@ def main() -> int:
         request("select_units 2 1 99999", succeeds=False)
         state = request("clear_selection")
         assert state["selected_count"] == 0
+        denied = request("queue_move 600 600", succeeds=False)
+        assert denied["error"] == "select one or more units before queueing a move"
+        denied = request("queue_attack 2", succeeds=False)
+        assert denied["error"] == "select one or more units before queueing an attack"
+
+        state = request("select 1")
+        assert state["selected_count"] == 1
+        moving = request("units 0 1")["units"][0]
+        assert moving["path_remaining"] > 0
+        state = request("queue_move 800 600")
+        assert state["last_move"]["units_ordered"] == 1
+        queued = request("units 0 1")["units"][0]
+        assert queued["order_count"] == 1
+        assert queued["attack_target"] == 0
+        request("queue_attack 2")
+        queued = request("units 0 1")["units"][0]
+        assert queued["order_count"] == 2
+        assert queued["attack_target"] == 0
+        request("move 420 280")
+        replaced = request("units 0 1")["units"][0]
+        assert replaced["order_count"] == 0
+        assert replaced["attack_target"] == 0
 
         request("stop")
         process.stdin.close()

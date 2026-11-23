@@ -343,48 +343,103 @@ void testAttackDamagesEnemyInRange() {
     require(milliDistanceSquared(simulation.units()[0].position,
                                   simulation.units()[1].position) <= range * range,
             "the second starter unit begins inside weapon range");
+    const std::int64_t chaseGap = range + rts::Simulation::kMilliunitsPerTick;
     std::uint32_t farId = 0;
     for (const auto& unit : simulation.units()) {
         if (unit.id == 1) {
             continue;
         }
         if (milliDistanceSquared(simulation.units()[0].position, unit.position) >
-            range * range) {
+            chaseGap * chaseGap) {
             farId = unit.id;
             break;
         }
     }
-    require(farId != 0, "a starter unit sits beyond weapon range");
+    require(farId != 0, "a starter unit sits beyond one chase tick");
 
     require(simulation.setTeam(2, 1), "an enemy team can be assigned");
     require(simulation.selectUnit(1), "the attacker can be selected");
+    const auto held = simulation.units()[0].position;
     require(simulation.attackSelected(2) == 1, "the attack order applies to the selection");
+    require(simulation.units()[0].nextWaypoint >= simulation.units()[0].path.size(),
+            "an attacker already in range holds still");
     require(simulation.commandLog().back().kind == rts::SimulationCommandKind::Attack &&
             simulation.commandLog().back().unitId == 2,
             "an attack logs the target id");
 
-    for (int tick = 0; tick < 9; ++tick) {
-        simulation.step();
-    }
+    const auto sceneBeforeShot = rts::buildSceneGeometry(simulation).size();
+    simulation.step();
     require(simulation.units()[1].alive &&
-            simulation.units()[1].health ==
-                rts::Simulation::kUnitHealth - 9 * rts::Simulation::kAttackDamage,
-            "nine ticks leave the enemy one hit from death");
+            simulation.units()[1].health == rts::Simulation::kUnitHealth &&
+            simulation.units()[0].attackCooldown == rts::Simulation::kAttackCooldownTicks &&
+            simulation.projectiles().size() == 1 &&
+            simulation.projectiles()[0].targetId == 2 &&
+            simulation.projectiles()[0].damage == rts::Simulation::kAttackDamage &&
+            simulation.projectiles()[0].x == rts::Simulation::worldMilliunits(held.x) &&
+            simulation.projectiles()[0].z == rts::Simulation::worldMilliunits(held.y),
+            "the first in-range tick launches a shot and starts the cooldown");
+    require(rts::buildSceneGeometry(simulation).size() - sceneBeforeShot == 30,
+            "a projectile adds one box to the scene");
     require(simulation.units()[0].health == rts::Simulation::kUnitHealth,
             "the attacker is not damaged by its own shot");
     simulation.step();
+    require(simulation.projectiles().size() == 1 &&
+            simulation.projectiles()[0].x > rts::Simulation::worldMilliunits(held.x) &&
+            simulation.units()[1].health == rts::Simulation::kUnitHealth,
+            "the shot moves toward the target before it hits");
+    int flight = 1;
+    while (simulation.units()[1].health == rts::Simulation::kUnitHealth && flight < 20) {
+        simulation.step();
+        ++flight;
+    }
+    require(flight > 1 && flight < 20 &&
+            simulation.units()[1].health ==
+                rts::Simulation::kUnitHealth - rts::Simulation::kAttackDamage &&
+            simulation.projectiles().empty() &&
+            simulation.units()[0].attackCooldown > 0,
+            "the shot deals its damage when it arrives");
+    const auto healthAfterHit = simulation.units()[1].health;
+    const auto cooldownAfterHit = simulation.units()[0].attackCooldown;
+    for (int tick = 1; tick < cooldownAfterHit; ++tick) {
+        simulation.step();
+        require(simulation.units()[1].health == healthAfterHit &&
+                simulation.projectiles().empty() &&
+                simulation.units()[0].attackCooldown == cooldownAfterHit - tick,
+                "the cooldown counts down without another shot");
+    }
+    simulation.step();
+    require(simulation.units()[1].health == healthAfterHit &&
+            simulation.projectiles().size() == 1 &&
+            simulation.units()[0].attackCooldown == rts::Simulation::kAttackCooldownTicks,
+            "the next shot launches when the cooldown reaches zero");
+    int hits = 1;
+    int guard = 0;
+    while (simulation.units()[1].alive && guard < 200) {
+        const auto before = simulation.units()[1].health;
+        simulation.step();
+        ++guard;
+        if (simulation.units()[1].health != before) {
+            ++hits;
+            require(!simulation.units()[1].alive ||
+                    simulation.units()[1].health ==
+                        rts::Simulation::kUnitHealth - hits * rts::Simulation::kAttackDamage,
+                    "each arrived shot deals one infantry hit");
+        }
+    }
     const auto corpse = simulation.units()[1].position;
-    require(!simulation.units()[1].alive && simulation.units()[1].health == 0 &&
-            simulation.units().size() == 8,
-            "zero health removes the unit from play and keeps its vector slot");
+    require(hits == 10 && !simulation.units()[1].alive &&
+            simulation.units()[1].health == 0 && simulation.units().size() == 8,
+            "ten infantry shots remove the unit and keep its vector slot");
     require(simulation.selectUnits({1, 2}) == 1 &&
             simulation.units()[0].selected && !simulation.units()[1].selected,
             "a dead id is omitted from a multi-select");
     simulation.step();
     require(simulation.units()[1].health == 0 &&
             simulation.units()[1].position.x == corpse.x &&
-            simulation.units()[1].position.y == corpse.y,
-            "a dead unit keeps its position and health");
+            simulation.units()[1].position.y == corpse.y &&
+            simulation.units()[0].position.x == held.x &&
+            simulation.units()[0].position.y == held.y,
+            "a dead unit keeps its position and the attacker stays in range");
 
     rts::Simulation replayed(8);
     rts::Simulation::replay(replayed, simulation.commandLog());
@@ -412,23 +467,264 @@ void testAttackDamagesEnemyInRange() {
     rts::Simulation friendly(8);
     require(friendly.selectUnit(1) && friendly.attackSelected(2) == 1,
             "a same-team attack order is accepted");
+    require(friendly.units()[0].nextWaypoint >= friendly.units()[0].path.size(),
+            "a same-team attack does not start a chase");
     friendly.step();
-    require(friendly.units()[1].health == rts::Simulation::kUnitHealth,
-            "units on the same team do not damage each other");
+    require(friendly.units()[1].health == rts::Simulation::kUnitHealth &&
+            friendly.projectiles().empty(),
+            "units on the same team do not fire at each other");
 
     rts::Simulation distant(8);
     require(distant.setTeam(farId, 1) && distant.selectUnit(1) &&
             distant.attackSelected(farId) == 1,
             "an out-of-range attack order is accepted");
+    require(distant.units()[0].nextWaypoint < distant.units()[0].path.size(),
+            "an out-of-range attack starts a chase path");
+    const auto chaseStart = distant.units()[0].position;
     distant.step();
     require(distant.units()[farId - 1].health == rts::Simulation::kUnitHealth,
-            "an attack beyond weapon range deals no damage");
+            "the first chase tick is still outside weapon range");
+    require(milliDistanceSquared(distant.units()[0].position,
+                                  distant.units()[farId - 1].position) <
+                milliDistanceSquared(chaseStart, distant.units()[farId - 1].position),
+            "the attacker closes distance");
+    int chaseTicks = 1;
+    while (milliDistanceSquared(distant.units()[0].position,
+                                 distant.units()[farId - 1].position) > range * range &&
+           chaseTicks < 400) {
+        require(distant.units()[farId - 1].health == rts::Simulation::kUnitHealth,
+                "the chase deals no damage before weapon range");
+        distant.step();
+        ++chaseTicks;
+    }
+    require(chaseTicks < 400 &&
+            milliDistanceSquared(distant.units()[0].position,
+                                 distant.units()[farId - 1].position) <= range * range,
+            "the chase reaches weapon range");
+    require(distant.units()[farId - 1].health == rts::Simulation::kUnitHealth &&
+            distant.projectiles().size() == 1,
+            "entering range launches a shot and does not hit yet");
+    int flightTicks = 0;
+    while (distant.units()[farId - 1].health == rts::Simulation::kUnitHealth &&
+           flightTicks < 30) {
+        distant.step();
+        ++flightTicks;
+    }
+    require(flightTicks > 0 && flightTicks < 30 &&
+            distant.units()[farId - 1].health ==
+                rts::Simulation::kUnitHealth - rts::Simulation::kAttackDamage &&
+            distant.projectiles().empty(),
+            "the shot damages the target when it arrives");
+    rts::Simulation chased(8);
+    rts::Simulation::replay(chased, distant.commandLog());
+    require(chased.stateHash() == distant.stateHash() &&
+            chased.units()[farId - 1].health == distant.units()[farId - 1].health,
+            "replaying a chase reproduces the approach and the hit");
+
+    rts::Simulation cancelled(8);
+    require(cancelled.setTeam(farId, 1) && cancelled.selectUnit(1) &&
+            cancelled.attackSelected(farId) == 1,
+            "cancel scenario starts a chase");
+    require(cancelled.moveSelected({500.0F, 500.0F}) == 1 &&
+            cancelled.units()[0].attackTarget == 0,
+            "a move order clears the attack");
+    cancelled.step();
+    require(cancelled.units()[farId - 1].health == rts::Simulation::kUnitHealth,
+            "a moved unit does not keep chasing");
 
     rts::Simulation idle(2);
     require(idle.attackSelected(1) == 0 &&
             idle.commandLog().back().kind == rts::SimulationCommandKind::Attack,
             "an attack with an empty selection is still logged");
     require(!idle.setTeam(99, 1), "an unknown unit id rejects the team assignment");
+
+    rts::Simulation flying(8);
+    require(flying.setTeam(2, 1) && flying.selectUnit(1) && flying.attackSelected(2) == 1,
+            "flight scenario attacks the neighbor");
+    flying.step();
+    require(flying.projectiles().size() == 1, "flight scenario launches a shot");
+    require(flying.moveSelected({500.0F, 500.0F}) == 1 && flying.units()[0].attackTarget == 0,
+            "a move clears the attack and leaves the shot in flight");
+    int flown = 0;
+    while (!flying.projectiles().empty() && flown < 20) {
+        flying.step();
+        ++flown;
+    }
+    require(flown > 0 && flown < 20 && flying.projectiles().empty() &&
+            flying.units()[1].health ==
+                rts::Simulation::kUnitHealth - rts::Simulation::kAttackDamage,
+            "a shot in flight still hits after the attacker moves");
+}
+
+void testRangerOutrangesInfantry() {
+    constexpr std::size_t population = 80;
+    rts::Simulation field(population);
+    const auto infantryRange = static_cast<std::int64_t>(rts::Simulation::kAttackRangeMilliunits);
+    const auto rangerRange = static_cast<std::int64_t>(rts::Simulation::kRangerRangeMilliunits);
+    const auto chaseGap = infantryRange + rts::Simulation::kMilliunitsPerTick;
+    std::uint32_t targetId = 0;
+    for (const auto& unit : field.units()) {
+        if (unit.id == 1) {
+            continue;
+        }
+        const auto distance = milliDistanceSquared(field.units()[0].position, unit.position);
+        if (distance > chaseGap * chaseGap && distance <= rangerRange * rangerRange) {
+            targetId = unit.id;
+            break;
+        }
+    }
+    require(targetId != 0, "a starter unit sits between infantry and ranger range");
+
+    rts::Simulation infantry(population);
+    require(infantry.setTeam(targetId, 1) && infantry.selectUnit(1) &&
+            infantry.attackSelected(targetId) == 1,
+            "infantry comparison attacks the mid-range target");
+    infantry.step();
+    require(infantry.units()[targetId - 1].health == rts::Simulation::kUnitHealth,
+            "infantry does not hit beyond its own range on the first tick");
+    require(infantry.units()[0].nextWaypoint < infantry.units()[0].path.size(),
+            "infantry chases a target beyond its range");
+
+    rts::Simulation ranger(population);
+    require(ranger.setArchetype(1, rts::UnitArchetype::Ranger),
+            "the lead unit can become a ranger");
+    require(ranger.units()[0].archetype == rts::UnitArchetype::Ranger &&
+            ranger.units()[0].health == rts::Simulation::kRangerHealth,
+            "becoming a ranger clamps health to the ranger maximum");
+    require(ranger.setArchetype(1, rts::UnitArchetype::Infantry),
+            "the lead unit can return to infantry");
+    require(ranger.units()[0].archetype == rts::UnitArchetype::Infantry &&
+            ranger.units()[0].health == rts::Simulation::kRangerHealth,
+            "returning to infantry does not restore clamped health");
+    require(ranger.setArchetype(1, rts::UnitArchetype::Ranger),
+            "the lead unit becomes a ranger again");
+    const auto held = ranger.units()[0].position;
+    require(ranger.setTeam(targetId, 1) && ranger.selectUnit(1) &&
+            ranger.attackSelected(targetId) == 1,
+            "the ranger attacks the mid-range target");
+    require(ranger.units()[0].nextWaypoint >= ranger.units()[0].path.size(),
+            "a ranger already in range holds still");
+    ranger.step();
+    require(ranger.units()[targetId - 1].health == rts::Simulation::kUnitHealth &&
+            ranger.units()[0].position.x == held.x &&
+            ranger.units()[0].position.y == held.y &&
+            ranger.units()[0].attackCooldown == rts::Simulation::kRangerCooldownTicks &&
+            ranger.projectiles().size() == 1,
+            "a ranger launches a shot at a target infantry cannot reach yet");
+    int rangerFlight = 0;
+    while (ranger.units()[targetId - 1].health == rts::Simulation::kUnitHealth &&
+           rangerFlight < 40) {
+        ranger.step();
+        ++rangerFlight;
+    }
+    require(rangerFlight > 0 && rangerFlight < 40 &&
+            ranger.units()[targetId - 1].health ==
+                rts::Simulation::kUnitHealth - rts::Simulation::kRangerDamage &&
+            ranger.projectiles().empty() &&
+            ranger.units()[0].position.x == held.x &&
+            ranger.units()[0].position.y == held.y &&
+            ranger.units()[0].attackCooldown > 0,
+            "the ranger shot arrives without the ranger moving");
+    const auto healthAfterRangerShot = ranger.units()[targetId - 1].health;
+    const auto cooldownAfterHit = ranger.units()[0].attackCooldown;
+    for (int tick = 1; tick < cooldownAfterHit; ++tick) {
+        ranger.step();
+        require(ranger.units()[targetId - 1].health == healthAfterRangerShot &&
+                ranger.projectiles().empty() &&
+                ranger.units()[0].attackCooldown == cooldownAfterHit - tick,
+                "a ranger does not fire again during its longer cooldown");
+    }
+    ranger.step();
+    require(ranger.units()[targetId - 1].health == healthAfterRangerShot &&
+            ranger.projectiles().size() == 1 &&
+            ranger.units()[0].attackCooldown == rts::Simulation::kRangerCooldownTicks,
+            "a ranger fires again when its cooldown reaches zero");
+    require(ranger.setArchetype(1, rts::UnitArchetype::Infantry) &&
+            ranger.units()[0].attackCooldown == rts::Simulation::kAttackCooldownTicks,
+            "a shorter weapon clamps the remaining cooldown");
+    require(ranger.setArchetype(1, rts::UnitArchetype::Ranger) &&
+            ranger.units()[0].attackCooldown == rts::Simulation::kAttackCooldownTicks,
+            "a longer weapon does not add cooldown");
+
+    rts::Simulation replayed(population);
+    rts::Simulation::replay(replayed, ranger.commandLog());
+    require(replayed.stateHash() == ranger.stateHash() &&
+            replayed.units()[0].archetype == rts::UnitArchetype::Ranger &&
+            replayed.units()[targetId - 1].health == ranger.units()[targetId - 1].health,
+            "replaying an archetype change reproduces the ranger hit");
+    require(!ranger.setArchetype(99, rts::UnitArchetype::Ranger),
+            "an unknown unit id rejects the archetype assignment");
+}
+
+void testCommandQueueRunsInOrder() {
+    rts::Simulation simulation(1);
+    const auto start = simulation.units()[0].position;
+    require(simulation.selectUnit(1), "queue scenario selects the unit");
+    require(simulation.moveSelected({start.x + 10.0F, start.y}) == 1,
+            "the first move starts immediately");
+    require(simulation.moveSelected({start.x + 30.0F, start.y},
+                                    rts::PathfindingAlgorithm::AStar, true) == 1,
+            "the second move queues behind the first");
+    require(simulation.units()[0].orders.size() == 1 &&
+            std::abs(simulation.units()[0].destination.x - (start.x + 10.0F)) < 1.0F,
+            "the active destination stays the first move");
+    require(simulation.moveSelected({start.x + 40.0F, start.y},
+                                    rts::PathfindingAlgorithm::AStar, true) == 1 &&
+            simulation.units()[0].orders.size() == 2,
+            "another move appends at the back of the queue");
+
+    int guard = 0;
+    while (simulation.units()[0].orders.size() == 2 && guard < 40) {
+        simulation.step();
+        ++guard;
+    }
+    require(simulation.units()[0].orders.size() == 1 &&
+            std::abs(simulation.units()[0].destination.x - (start.x + 30.0F)) < 1.0F,
+            "the second move starts when the first one finishes");
+    while (!simulation.units()[0].orders.empty() && guard < 80) {
+        simulation.step();
+        ++guard;
+    }
+    require(simulation.units()[0].orders.empty() &&
+            std::abs(simulation.units()[0].destination.x - (start.x + 40.0F)) < 1.0F,
+            "the third move starts when the second one finishes");
+    while (simulation.units()[0].nextWaypoint < simulation.units()[0].path.size() &&
+           guard < 120) {
+        simulation.step();
+        ++guard;
+    }
+    require(std::abs(simulation.units()[0].position.x - (start.x + 40.0F)) < 0.05F &&
+            std::abs(simulation.units()[0].position.y - start.y) < 0.05F,
+            "the unit arrives at the last queued destination");
+
+    rts::Simulation replayed(1);
+    rts::Simulation::replay(replayed, simulation.commandLog());
+    require(replayed.stateHash() == simulation.stateHash() &&
+            std::abs(replayed.units()[0].position.x - simulation.units()[0].position.x) < 0.001F,
+            "replaying the queue reproduces the final position");
+
+    rts::Simulation replaced(1);
+    const auto origin = replaced.units()[0].position;
+    require(replaced.selectUnit(1) &&
+            replaced.moveSelected({origin.x + 10.0F, origin.y}) == 1 &&
+            replaced.moveSelected({origin.x + 30.0F, origin.y},
+                                  rts::PathfindingAlgorithm::AStar, true) == 1,
+            "replace scenario queues a move");
+    require(replaced.moveSelected({origin.x + 16.0F, origin.y}) == 1 &&
+            replaced.units()[0].orders.empty(),
+            "an immediate move clears the queue");
+
+    rts::Simulation attack(4);
+    require(attack.setTeam(2, 1) && attack.selectUnit(1) &&
+            attack.moveSelected({attack.units()[0].position.x + 10.0F,
+                                 attack.units()[0].position.y}) == 1 &&
+            attack.attackSelected(2, true) == 1,
+            "an attack can queue behind a move");
+    require(attack.units()[0].orders.size() == 1 && attack.units()[0].attackTarget == 0,
+            "the queued attack waits until the move finishes");
+    attack.step();
+    require(attack.units()[0].attackTarget == 0,
+            "one tick of the move does not start the queued attack");
 }
 
 void testSelectionById() {
@@ -1110,6 +1406,21 @@ void testFormationFlowFieldSearchesLessThanPerUnitAStar() {
                 std::to_string(astarExpanded) + ")");
 }
 
+void testLargeFormationFlowFieldKeepsItsRouteCost() {
+    constexpr std::size_t count = 1800;
+    const auto ids = leadingUnitIds(count);
+    rts::Simulation simulation(count);
+    require(simulation.selectUnits(ids) == count &&
+            simulation.moveSelected({1800.0F, 1300.0F}) == count &&
+            simulation.lastMoveCommand().unitsRouted == count,
+            "large formation order routes every unit");
+    const auto& metrics = simulation.lastPathfindingMetrics();
+    require(metrics.formationPaths == count && metrics.formationFallbacks == 0,
+            "large formation order stays on offset paths");
+    require(metrics.pathCost == 111320545ULL,
+            "large far-corner flow cost stays " + std::to_string(metrics.pathCost));
+}
+
 void testRoutePrefersRidgePass() {
     const rts::Vec2 crest{380.0F, 650.0F};
     const rts::Vec2 pass{560.0F, 650.0F};
@@ -1196,6 +1507,8 @@ int main() {
     testCommandLogRecordsCallerCommands();
     testReplayDivergence();
     testAttackDamagesEnemyInRange();
+    testRangerOutrangesInfantry();
+    testCommandQueueRunsInOrder();
     testSelectionById();
     testMovementStaysInsideBattlefield();
     testMultiUnitOrderFeedback();
@@ -1211,6 +1524,7 @@ int main() {
     testFormationFlowField();
     testFormationRoutesAcrossTerrain();
     testFormationFlowFieldSearchesLessThanPerUnitAStar();
+    testLargeFormationFlowFieldKeepsItsRouteCost();
     testRoutePrefersRidgePass();
     testCameraGroundProjectionRoundTrip();
     testCameraElevatedGroundPicking();

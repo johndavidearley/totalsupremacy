@@ -285,6 +285,18 @@ the p95 is 0.131 ms, and the position checksum is 3353087934. Route medians
 from that run differed by noise and do not replace the table. These are local
 observations, not a budget.
 
+A later profile of the same 1,800-unit far-corner flow-field order on this
+host showed the shared search at about 1 ms. The remaining time was per-unit
+sampling along the shared 46-point spine. `segmentBlockedByTerrain` now
+rejects a segment whose padded bounds miss every inflated obstacle before it
+samples. Overlapping segments still sample every 2 world units, so the
+predicate is unchanged. The order still places every unit on a formation
+path, with no individual fallback, at the same flow cost of 61,844.747.
+On this Release build the order measured 49.060 ms median before that
+rejection and 15.138 ms median after it (five trials following one warmup).
+That pair is one local observation. It does not replace the table above and
+it is not a budget.
+
 ### Headless CPU scene-geometry benchmark
 
 The renderer's CPU geometry generation is also available without a graphics

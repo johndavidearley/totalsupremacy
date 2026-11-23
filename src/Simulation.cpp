@@ -244,7 +244,7 @@ void applyCommand(Simulation& simulation, const SimulationCommand& command) {
         simulation.moveSelected(
             {Simulation::worldFromMilliunits(command.destinationMilliX),
              Simulation::worldFromMilliunits(command.destinationMilliZ)},
-            command.algorithm);
+            command.algorithm, command.append);
         break;
     case SimulationCommandKind::Step:
         simulation.step();
@@ -253,7 +253,11 @@ void applyCommand(Simulation& simulation, const SimulationCommand& command) {
         simulation.setTeam(command.unitId, command.team);
         break;
     case SimulationCommandKind::Attack:
-        simulation.attackSelected(command.unitId);
+        simulation.attackSelected(command.unitId, command.append);
+        break;
+    case SimulationCommandKind::SetArchetype:
+        simulation.setArchetype(
+            command.unitId, static_cast<UnitArchetype>(command.archetype));
         break;
     }
 }
@@ -422,6 +426,9 @@ float Simulation::terrainElevation(Vec2 position) const noexcept {
 
 void Simulation::step() {
     for (auto& unit : units_) {
+        refreshChase(unit);
+    }
+    for (auto& unit : units_) {
         if (!unit.alive || unit.nextWaypoint >= unit.path.size()) {
             continue;
         }
@@ -471,7 +478,9 @@ void Simulation::step() {
             unit.destination = unit.position;
         }
     }
+    advanceProjectiles();
     resolveAttacks();
+    advanceOrders();
     ++tickCount_;
     commandLog_.push_back(makeCommand(SimulationCommandKind::Step));
 }
@@ -542,7 +551,8 @@ void Simulation::clearSelection() {
 }
 
 std::size_t Simulation::moveSelected(Vec2 destination,
-                                     PathfindingAlgorithm algorithm) {
+                                     PathfindingAlgorithm algorithm,
+                                     bool append) {
     destination = fromMilli(toMilli(destination));
     const auto count = selectedCount();
     lastMoveCommand_ = {true, destination, count, 0, tickCount_};
@@ -553,6 +563,7 @@ std::size_t Simulation::moveSelected(Vec2 destination,
         command.destinationMilliX = worldMilliunits(destination.x);
         command.destinationMilliZ = worldMilliunits(destination.y);
         command.algorithm = algorithm;
+        command.append = append;
         commandLog_.push_back(std::move(command));
     };
     if (count == 0) {
@@ -562,6 +573,47 @@ std::size_t Simulation::moveSelected(Vec2 destination,
 
     const auto columns = static_cast<std::size_t>(
         std::ceil(std::sqrt(static_cast<double>(count))));
+    bool anyBusy = false;
+    if (append) {
+        for (const auto& unit : units_) {
+            if (unit.selected && (orderInProgress(unit) || !unit.orders.empty())) {
+                anyBusy = true;
+                break;
+            }
+        }
+    }
+    if (append && anyBusy) {
+        std::size_t index = 0;
+        for (auto& unit : units_) {
+            if (!unit.selected) {
+                continue;
+            }
+            const auto slot = formationDestination(destination, columns, index);
+            UnitOrder order;
+            order.kind = UnitOrderKind::Move;
+            order.destinationMilliX = worldMilliunits(slot.x);
+            order.destinationMilliZ = worldMilliunits(slot.y);
+            order.algorithm = static_cast<std::uint8_t>(PathfindingAlgorithm::AStar);
+            if (orderInProgress(unit) || !unit.orders.empty()) {
+                unit.orders.push_back(order);
+            } else {
+                beginOrder(unit, order);
+                if (unit.nextWaypoint < unit.path.size()) {
+                    ++lastMoveCommand_.unitsRouted;
+                }
+            }
+            ++index;
+        }
+        recordMove();
+        return count;
+    }
+
+    for (auto& unit : units_) {
+        if (unit.selected) {
+            unit.attackTarget = 0;
+            unit.orders.clear();
+        }
+    }
     if (count > 1 && algorithm == PathfindingAlgorithm::FlowField) {
         routeFormation(destination, columns);
         recordMove();
@@ -605,20 +657,143 @@ bool Simulation::setTeam(std::uint32_t id, std::uint8_t team) {
     return true;
 }
 
-std::size_t Simulation::attackSelected(std::uint32_t targetId) {
+bool Simulation::setArchetype(std::uint32_t id, UnitArchetype archetype) {
+    SimulationCommand command;
+    command.kind = SimulationCommandKind::SetArchetype;
+    command.unitId = id;
+    command.archetype = static_cast<std::uint8_t>(archetype);
+    commandLog_.push_back(std::move(command));
+    if (archetype != UnitArchetype::Infantry && archetype != UnitArchetype::Ranger) {
+        return false;
+    }
+    Unit* unit = findUnit(id);
+    if (unit == nullptr) {
+        return false;
+    }
+    unit->archetype = archetype;
+    const auto maximum = archetypeHealth(archetype);
+    if (unit->alive && unit->health > maximum) {
+        unit->health = maximum;
+    }
+    const auto cooldown = archetypeCooldown(archetype);
+    if (unit->attackCooldown > cooldown) {
+        unit->attackCooldown = cooldown;
+    }
+    if (unit->attackTarget != 0) {
+        unit->path.clear();
+        unit->nextWaypoint = 0;
+        refreshChase(*unit);
+    }
+    return true;
+}
+
+std::size_t Simulation::attackSelected(std::uint32_t targetId, bool append) {
     SimulationCommand command;
     command.kind = SimulationCommandKind::Attack;
     command.unitId = targetId;
+    command.append = append;
     commandLog_.push_back(std::move(command));
     std::size_t count = 0;
     for (Unit& unit : units_) {
         if (!unit.selected || !unit.alive) {
             continue;
         }
-        unit.attackTarget = targetId;
+        if (append && (orderInProgress(unit) || !unit.orders.empty())) {
+            UnitOrder order;
+            order.kind = UnitOrderKind::Attack;
+            order.targetId = targetId;
+            unit.orders.push_back(order);
+        } else {
+            unit.orders.clear();
+            unit.attackTarget = targetId;
+            refreshChase(unit);
+        }
         ++count;
     }
     return count;
+}
+
+bool Simulation::orderInProgress(const Unit& unit) {
+    if (!unit.alive) {
+        return false;
+    }
+    if (unit.attackTarget != 0) {
+        const Unit* target = findUnit(unit.attackTarget);
+        return target != nullptr && target->alive;
+    }
+    return unit.nextWaypoint < unit.path.size();
+}
+
+void Simulation::beginOrder(Unit& unit, const UnitOrder& order) {
+    unit.path.clear();
+    unit.nextWaypoint = 0;
+    if (order.kind == UnitOrderKind::Attack) {
+        unit.attackTarget = order.targetId;
+        refreshChase(unit);
+        return;
+    }
+    unit.attackTarget = 0;
+    PathfindingMetrics metrics;
+    const Vec2 goal{
+        worldFromMilliunits(order.destinationMilliX),
+        worldFromMilliunits(order.destinationMilliZ)
+    };
+    const auto algorithm = static_cast<PathfindingAlgorithm>(order.algorithm);
+    if (!findPath(unit.position, goal, unit.path, unit.destination, metrics, algorithm)) {
+        unit.destination = unit.position;
+    }
+}
+
+void Simulation::advanceOrders() {
+    for (Unit& unit : units_) {
+        if (!unit.alive) {
+            unit.orders.clear();
+            continue;
+        }
+        while (!unit.orders.empty() && !orderInProgress(unit)) {
+            const UnitOrder next = unit.orders.front();
+            unit.orders.erase(unit.orders.begin());
+            beginOrder(unit, next);
+        }
+    }
+}
+
+bool Simulation::withinAttackRange(const Unit& attacker, Vec2 target) const noexcept {
+    const std::int64_t dx = static_cast<std::int64_t>(worldMilliunits(attacker.position.x)) -
+        worldMilliunits(target.x);
+    const std::int64_t dy = static_cast<std::int64_t>(worldMilliunits(attacker.position.y)) -
+        worldMilliunits(target.y);
+    const std::int64_t range = archetypeRange(attacker.archetype);
+    return dx * dx + dy * dy <= range * range;
+}
+
+void Simulation::refreshChase(Unit& attacker) {
+    if (!attacker.alive || attacker.attackTarget == 0) {
+        return;
+    }
+    const auto hold = [](Unit& unit) {
+        unit.path.clear();
+        unit.nextWaypoint = 0;
+        unit.destination = unit.position;
+    };
+    const Unit* target = findUnit(attacker.attackTarget);
+    if (target == nullptr || !target->alive || target->team == attacker.team ||
+        withinAttackRange(attacker, target->position)) {
+        hold(attacker);
+        return;
+    }
+    // Keep the current path until it runs out. Replanning every tick would
+    // repeat A* while the target is still ahead of that route.
+    if (attacker.nextWaypoint < attacker.path.size()) {
+        return;
+    }
+    PathfindingMetrics metrics;
+    attacker.path.clear();
+    attacker.nextWaypoint = 0;
+    if (!findPath(attacker.position, target->position, attacker.path,
+                  attacker.destination, metrics, PathfindingAlgorithm::AStar)) {
+        hold(attacker);
+    }
 }
 
 Unit* Simulation::findUnit(std::uint32_t id) noexcept {
@@ -629,27 +804,69 @@ Unit* Simulation::findUnit(std::uint32_t id) noexcept {
     return unit.id == id ? &unit : nullptr;
 }
 
-void Simulation::resolveAttacks() {
+void Simulation::advanceProjectiles() {
     std::vector<std::int32_t> damage(units_.size(), 0);
-    const std::int64_t range = kAttackRangeMilliunits;
-    const std::int64_t rangeSquared = range * range;
-    for (const Unit& attacker : units_) {
-        if (!attacker.alive || attacker.attackTarget == 0) {
+    std::vector<Projectile> still;
+    still.reserve(projectiles_.size());
+    const std::int64_t speed = kProjectileMilliunitsPerTick;
+    for (Projectile shot : projectiles_) {
+        Unit* target = findUnit(shot.targetId);
+        if (target == nullptr || !target->alive || target->team == shot.team) {
+            continue;
+        }
+        const std::int64_t dx = static_cast<std::int64_t>(worldMilliunits(target->position.x)) -
+            shot.x;
+        const std::int64_t dz = static_cast<std::int64_t>(worldMilliunits(target->position.y)) -
+            shot.z;
+        const std::int64_t distanceSquared = dx * dx + dz * dz;
+        if (distanceSquared <= speed * speed) {
+            damage[static_cast<std::size_t>(target->id - 1)] += shot.damage;
+            continue;
+        }
+        const std::int64_t distance = floorSqrt(distanceSquared);
+        shot.x += static_cast<std::int32_t>(dx * speed / distance);
+        shot.z += static_cast<std::int32_t>(dz * speed / distance);
+        still.push_back(shot);
+    }
+    projectiles_ = std::move(still);
+    applyDamage(damage);
+}
+
+void Simulation::resolveAttacks() {
+    for (Unit& unit : units_) {
+        if (unit.alive && unit.attackCooldown > 0) {
+            --unit.attackCooldown;
+        }
+    }
+    std::vector<std::uint8_t> fired(units_.size(), 0);
+    for (std::size_t index = 0; index < units_.size(); ++index) {
+        const Unit& attacker = units_[index];
+        if (!attacker.alive || attacker.attackTarget == 0 || attacker.attackCooldown != 0) {
             continue;
         }
         const Unit* target = findUnit(attacker.attackTarget);
-        if (target == nullptr || !target->alive || target->team == attacker.team) {
+        if (target == nullptr || !target->alive || target->team == attacker.team ||
+            !withinAttackRange(attacker, target->position)) {
             continue;
         }
-        const std::int64_t dx = static_cast<std::int64_t>(worldMilliunits(attacker.position.x)) -
-            worldMilliunits(target->position.x);
-        const std::int64_t dy = static_cast<std::int64_t>(worldMilliunits(attacker.position.y)) -
-            worldMilliunits(target->position.y);
-        if (dx * dx + dy * dy > rangeSquared) {
-            continue;
-        }
-        damage[static_cast<std::size_t>(target->id - 1)] += kAttackDamage;
+        Projectile shot;
+        shot.id = nextProjectileId_++;
+        shot.x = worldMilliunits(attacker.position.x);
+        shot.z = worldMilliunits(attacker.position.y);
+        shot.targetId = attacker.attackTarget;
+        shot.damage = archetypeDamage(attacker.archetype);
+        shot.team = attacker.team;
+        projectiles_.push_back(shot);
+        fired[index] = 1;
     }
+    for (std::size_t index = 0; index < units_.size(); ++index) {
+        if (fired[index] != 0) {
+            units_[index].attackCooldown = archetypeCooldown(units_[index].archetype);
+        }
+    }
+}
+
+void Simulation::applyDamage(const std::vector<std::int32_t>& damage) {
     for (std::size_t index = 0; index < units_.size(); ++index) {
         if (damage[index] <= 0) {
             continue;
@@ -666,6 +883,8 @@ void Simulation::resolveAttacks() {
         unit.alive = false;
         unit.selected = false;
         unit.attackTarget = 0;
+        unit.attackCooldown = 0;
+        unit.orders.clear();
         unit.path.clear();
         unit.nextWaypoint = 0;
         unit.destination = unit.position;
@@ -760,6 +979,10 @@ std::size_t Simulation::moveSelected(Vec2 destination, GridPathBackend& backend)
     }
 
     MoveCommandFeedback feedback{true, destination, count, 0, tickCount_};
+    for (const auto index : unitIndices) {
+        units_[index].attackTarget = 0;
+        units_[index].orders.clear();
+    }
     for (std::size_t i = 0; i < count; ++i) {
         auto& unit = units_[unitIndices[i]];
         unit.path.clear();
@@ -784,10 +1007,14 @@ std::size_t Simulation::selectedCount() const noexcept {
 }
 
 std::uint64_t Simulation::stateHash() const noexcept {
-    // Version 2, little-endian: version u32, tick u64, each unit in vector
+    // Version 6, little-endian: version u32, tick u64, each unit in vector
     // order (id u32, position and destination milliunits i32, next waypoint
-    // u32, selected u8, team u8, alive u8, health i32, attack target u32,
-    // path count u32, each waypoint's milliunits), then the last move
+    // u32, selected u8, team u8, archetype u8, alive u8, health i32, attack
+    // target u32, attack cooldown i32, queued-order count u32, each order's
+    // kind u8, destination milliunits i32, target u32, and algorithm u8,
+    // path count u32, each waypoint's milliunits), the next projectile id,
+    // each shot in flight (id u32, milliunits i32, target u32, damage i32,
+    // team u8), then the last move
     // (valid u8, requested milliunits i32, ordered and routed counts u32,
     // issue tick u64).
     constexpr std::uint64_t offset = 14695981039346656037ULL;
@@ -799,7 +1026,7 @@ std::uint64_t Simulation::stateHash() const noexcept {
             hash *= prime;
         }
     };
-    mix(2U, 4);
+    mix(6U, 4);
     mix(tickCount_, 8);
     for (const Unit& unit : units_) {
         const auto milli = [](float world) noexcept {
@@ -813,14 +1040,34 @@ std::uint64_t Simulation::stateHash() const noexcept {
         mix(static_cast<std::uint32_t>(unit.nextWaypoint), 4);
         mix(unit.selected ? 1U : 0U, 1);
         mix(unit.team, 1);
+        mix(static_cast<std::uint8_t>(unit.archetype), 1);
         mix(unit.alive ? 1U : 0U, 1);
         mix(static_cast<std::uint32_t>(unit.health), 4);
         mix(unit.attackTarget, 4);
+        mix(static_cast<std::uint32_t>(unit.attackCooldown), 4);
+        mix(static_cast<std::uint32_t>(unit.orders.size()), 4);
+        for (const UnitOrder& order : unit.orders) {
+            mix(static_cast<std::uint8_t>(order.kind), 1);
+            mix(static_cast<std::uint32_t>(order.destinationMilliX), 4);
+            mix(static_cast<std::uint32_t>(order.destinationMilliZ), 4);
+            mix(order.targetId, 4);
+            mix(order.algorithm, 1);
+        }
         mix(static_cast<std::uint32_t>(unit.path.size()), 4);
         for (const Vec2& waypoint : unit.path) {
             mix(milli(waypoint.x), 4);
             mix(milli(waypoint.y), 4);
         }
+    }
+    mix(nextProjectileId_, 4);
+    mix(static_cast<std::uint32_t>(projectiles_.size()), 4);
+    for (const Projectile& shot : projectiles_) {
+        mix(shot.id, 4);
+        mix(static_cast<std::uint32_t>(shot.x), 4);
+        mix(static_cast<std::uint32_t>(shot.z), 4);
+        mix(shot.targetId, 4);
+        mix(static_cast<std::uint32_t>(shot.damage), 4);
+        mix(shot.team, 1);
     }
     mix(lastMoveCommand_.valid ? 1U : 0U, 1);
     mix(static_cast<std::uint32_t>(
@@ -894,6 +1141,29 @@ bool Simulation::blockedByTerrain(Vec2 position) const noexcept {
 }
 
 bool Simulation::segmentBlockedByTerrain(Vec2 start, Vec2 end) const noexcept {
+    // Samples lie on the segment, so a segment whose padded bounds miss every
+    // inflated obstacle cannot contain a blocked sample. The pad covers
+    // milliunit-to-float rounding. Overlapping segments still sample.
+    constexpr float clearance = 6.5F;
+    constexpr float pad = 0.05F;
+    const float minX = std::min(start.x, end.x) - pad;
+    const float maxX = std::max(start.x, end.x) + pad;
+    const float minY = std::min(start.y, end.y) - pad;
+    const float maxY = std::max(start.y, end.y) + pad;
+    bool overlaps = false;
+    for (const TerrainObstacle& obstacle : terrainObstacles_) {
+        if (maxX >= obstacle.minimum.x - clearance &&
+            minX <= obstacle.maximum.x + clearance &&
+            maxY >= obstacle.minimum.y - clearance &&
+            minY <= obstacle.maximum.y + clearance) {
+            overlaps = true;
+            break;
+        }
+    }
+    if (!overlaps) {
+        return false;
+    }
+
     const MilliPoint from = toMilli(start);
     const MilliPoint to = toMilli(end);
     const std::int64_t dx = static_cast<std::int64_t>(to.x) - from.x;

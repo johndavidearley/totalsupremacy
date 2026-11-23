@@ -126,11 +126,24 @@ def _command_line(step: dict) -> list[str]:
         if unit_id < 1 or not 0 <= team <= 255:
             raise PlaytestError("set_team requires a unit id and a team in 0..255")
         return [f"set_team {unit_id} {team}"]
+    if command == "set_archetype":
+        unit_id = int(args["id"])
+        archetype = int(args["archetype"])
+        if unit_id < 1 or archetype not in (0, 1):
+            raise PlaytestError("set_archetype requires a unit id and an archetype of 0 or 1")
+        return [f"set_archetype {unit_id} {archetype}"]
     if command == "attack":
         target = int(args.get("target", 0))
         if target < 0:
             raise PlaytestError("attack target must be a unit id or 0")
         return [f"attack {target}"]
+    if command == "queue_move":
+        return [f"queue_move {float(args['x'])} {float(args['z'])}"]
+    if command == "queue_attack":
+        target = int(args.get("target", 0))
+        if target < 0:
+            raise PlaytestError("queue_attack target must be a unit id or 0")
+        return [f"queue_attack {target}"]
     if command == "pause":
         paused = args.get("paused", True)
         return [f"pause {1 if paused else 0}"]

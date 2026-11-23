@@ -49,10 +49,17 @@ Elevation cost and the western ridge are tuned so routes take the pass
 instead of the crest. The local GPU render-pass p95 spike was a per-frame
 swapchain rebuild, not the pass itself. Movement, path construction, and
 elevation costs use integer arithmetic.
+A 1,800-unit group order spends its time sampling per-unit offsets of the
+shared spine. A segment that misses every obstacle is rejected before those
+samples. The flow-field travel cost is unchanged.
 The simulation records a caller-facing command log and an FNV-1a state hash;
 replaying the log reproduces the hash. Two logs can be compared locally at
-the first differing command. A selected unit can attack an enemy team inside
-40 world units; dead units stay in the vector. There is still one archetype
-and no chase order. Multiplayer is not implemented. Next, set performance
+the first differing command. A selected unit chases an enemy with A* and
+attacks inside its own range. Infantry reaches 40 world units and reloads
+in 10 ticks; a ranger reaches 70 and reloads in 20. A shot travels 8
+world units per tick and hits when it reaches its target. Dead units stay in the
+vector. An appended move or attack waits
+behind the active order; an immediate order clears that queue. Multiplayer
+is not implemented. Next, set performance
 budgets from representative target hardware. The local measurements are not
 yet budgets. Windows and Linux builds are still unvalidated.

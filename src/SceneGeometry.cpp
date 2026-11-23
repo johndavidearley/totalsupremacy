@@ -207,9 +207,19 @@ std::vector<SceneVertex> buildSceneGeometry(const Simulation& simulation) {
                ground + 7.05F, 3.2F,
                unit.selected ? Color{1.0F, 0.84F, 0.43F}
                              : Color{0.56F, 0.77F, 0.88F});
+        const Color weapon = unit.archetype == rts::UnitArchetype::Ranger
+            ? Color{0.42F, 0.78F, 0.46F}
+            : Color{0.72F, 0.81F, 0.78F};
         addBox(vertices, x + 2.5F, z - 1.15F, 5.8F, 2.3F,
                ground + 8.0F, 1.25F,
-               unit.selected ? selectedColor : Color{0.72F, 0.81F, 0.78F});
+               unit.selected ? selectedColor : weapon);
+    }
+    for (const auto& shot : simulation.projectiles()) {
+        const Vec2 at{Simulation::worldFromMilliunits(shot.x),
+                      Simulation::worldFromMilliunits(shot.z)};
+        addBox(vertices, at.x - 0.7F, at.y - 0.7F, 1.4F, 1.4F,
+               simulation.terrainElevation(at) + 6.0F, 1.4F,
+               Color{0.95F, 0.86F, 0.35F});
     }
     const auto& feedback = simulation.lastMoveCommand();
     if (feedback.valid && simulation.tickCount() - feedback.issuedAtTick <= 90) {

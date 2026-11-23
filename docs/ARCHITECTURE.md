@@ -45,14 +45,15 @@ or terrain passability.
 Authoritative gameplay has a command log and a state hash. The log records
 caller-facing `selectUnit`, `selectUnits`, `clearSelection`, `moveSelected`
 (the destination in milliunits and the CPU algorithm), `setTeam`,
-`attackSelected`, and `step`. `selectNearest` records the unit it resolved,
+`setArchetype`, `attackSelected`, and `step`. Appended moves and attacks
+wait behind the active order. `selectNearest` records the unit it resolved,
 or a clear when it misses. A path-backend move is not a replay command.
 `replay` applies that log to a fresh simulation of the same unit count by
 calling those methods, so the replay records an equal log. `stateHash` is
-FNV-1a 64 over little-endian bytes: format version 2, the tick, each unit in
+FNV-1a 64 over little-endian bytes: format version 6, the tick, each unit in
 vector order (id, position and destination milliunits, next waypoint index,
-selection, team, alive, health, attack target, and path waypoints in
-milliunits), then the last move (validity, requested milliunit destination,
+selection, team, archetype, alive, health, attack target, attack cooldown,
+queued orders, and path waypoints in milliunits), each shot in flight, then the last move (validity, requested milliunit destination,
 ordered and routed counts, and issue tick). The hash excludes
 the camera, the pause flag, pathfinding metrics, static obstacles, and the
 command log. `findReplayDivergence` replays two logs on fresh simulations
@@ -108,12 +109,19 @@ advancement, camera pose, and stop operations. The state response includes
 - **Tests:** behavior, camera projection/picking math, and end-to-end headless MCP
   control protocol.
 
-The current simulation is single-threaded. Combat is one infantry attack:
-after movement, a living unit damages an enemy inside 40 world units for 10
-health, and a unit at 0 health stays in place. There is no networking,
-chase order, second archetype, hierarchical navigation, persistence, content
-pipeline, or mod API. The Vulkan/GLFW presentation and simulation control
-have only been validated on macOS so far.
+The current simulation is single-threaded. Combat has two archetypes that
+share one movement speed. Infantry has 100 health, 10 damage, and a 40-unit
+range. A ranger has 70 health, 6 damage, and a 70-unit range. An attacker
+beyond its own range paths to the target with A* and stops on entering
+range. Infantry reloads in 10 ticks and a ranger in 20. The timer counts
+down every tick the unit is alive. After movement, a ready attacker
+launches a shot and then reloads. The shot moves 8 world units per tick
+toward its target and deals its damage on arrival. A unit at 0 health stays in
+place. A later immediate move or attack clears
+the queue. An appended order waits until the active move finishes or its
+attack target is gone. There is no networking, hierarchical navigation,
+persistence, content pipeline, or mod API. The Vulkan/GLFW presentation and
+simulation control have only been validated on macOS so far.
 Add systems only when a playable slice requires them. The command log,
 state hash, and local divergence check are the replay format. Lockstep
 networking was evaluated and is not implemented.

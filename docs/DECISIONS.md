@@ -140,19 +140,98 @@ This decision does not choose a wire format, a tick budget, or a transport.
 
 **Decision:** Every starter unit is one infantry archetype with 100 health.
 `setTeam` assigns a team. `attackSelected` stores a target id on each
-selected living unit. After movement on that tick, each living attacker
-deals 10 damage to its target when the target is alive, on another team,
-and within 40 world units. Distance is milliunits, compared without a
-square root. At 0 health the unit stays in the vector, drops selection and
-its attack, and no longer moves or blocks selection. There is no projectile,
-cooldown, or second archetype.
+selected living unit. A living enemy beyond 40 world units gets one A*
+path to that target's current position. The path is kept until it runs
+out, then rebuilt if the target is still out of range. Entering range
+clears the path before the next move. After movement on that tick, each
+living attacker deals 10 damage when the target is alive, on another team,
+and inside that range. Distance is milliunits, compared without a square
+root. A later move clears the attack. At 0 health the unit stays in the
+vector, drops selection and its attack, and no longer moves or blocks
+selection. There is no projectile or cooldown. A second archetype is ADR 010.
 
 **Rationale:** The starter army is one team, so existing move orders do not
 cause damage. A test or MCP session opts in by assigning another team.
 Keeping the corpse in place preserves stable unit ids and the vector order
-already covered by the state hash. The hash format is version 2 and includes
-team, alive, health, and attack target.
+already covered by the state hash. The hash includes team, alive, health,
+and attack target.
 
-**Tradeoff:** An attacker does not chase. Out-of-range orders deal no damage
-until something else closes the distance. The desktop click path still issues
-moves. Multiple archetypes and a command queue remain future work.
+**Tradeoff:** The chase does not steer around a moving target until the
+current path runs out. The desktop click path still issues moves. Orders
+queue behind the active command in ADR 011.
+
+## ADR 010 — Ranger is a longer-range infantry variant
+
+**Decision:** Add one more archetype, ranger. Infantry stays at 100 health,
+10 damage, and 40 world units of range. A ranger has 70 health, 6 damage,
+and 70 world units of range. Both move at 2,400 milliunits per tick.
+`setArchetype` clamps current health down to the new maximum and does not
+heal it back. Starter units remain infantry.
+
+**Rationale:** The two stat lines make range matter before a second
+movement speed or a weapon system exists. A ranger can hit a target that an
+infantry unit still has to chase. The state hash format is version 3 and
+includes the archetype.
+
+**Tradeoff:** There is still no projectile. Weapon cooldown is ADR 012.
+The desktop click path still issues an immediate move.
+
+## ADR 011 — Orders queue behind the active command
+
+**Decision:** `moveSelected` and `attackSelected` take an append flag. The
+default replaces the active order and clears the queue. Append on an idle
+unit starts immediately, including a group flow-field move. Append on a
+busy unit stores the order. A queued move remembers the formation slot from
+issue time and routes with A* when it starts. The next order begins after
+movement and attacks on the tick the current move runs out of path, or the
+attack target is dead or missing. The new order's movement starts on the
+following tick.
+
+**Rationale:** Click-to-move stays a replacement, which is what the desktop
+path already does. A queue lets a playtest or MCP session chain a move and
+an attack without cancelling the first. The queue is part of the version 4
+state hash, so replay sees it.
+
+**Tradeoff:** A queued group does not rebuild a shared flow field when the
+order starts. Each unit paths alone to the slot it was given. The desktop
+click path has no shift-queue binding.
+
+## ADR 012 — Weapons reload between shots
+
+**Decision:** Each archetype has a cooldown in ticks. Infantry reloads in
+10 ticks and a ranger in 20. A living unit's cooldown counts down every
+tick, including while it chases or moves. After movement, a ready attacker
+launches the shot in ADR 013, then reloads. A shot that is not in range
+does not spend the cooldown.
+Changing archetype clamps a longer remaining cooldown down to the new
+weapon and does not add time. Death clears the cooldown. The state hash
+format is version 5 and includes the remaining cooldown.
+
+**Rationale:** The two stat lines previously fired every tick, so a fight
+was over in a third of a second and the ranger's lower damage barely
+mattered. A reload makes the longer range cost a slower shot. Counting
+the timer down during a chase means a weapon that reloaded on the way can
+fire on the tick it enters range.
+
+**Tradeoff:** The shot's travel time is ADR 013. A reload only decides when
+the next shot launches.
+
+## ADR 013 — Shots travel to the target
+
+**Decision:** A ready attacker launches a projectile instead of damaging on
+the firing tick. The shot stores the attacker's damage and team and starts
+at the attacker's position. On later ticks it moves 8 world units toward
+the target's current position. It hits when the remaining distance is
+within that step, then deals its stored damage. A shot whose target is
+missing, dead, or on the firing team expires without damage. Clearing the
+attack or moving the attacker leaves shots already in flight. The state
+hash format is version 6 and includes each shot.
+
+**Rationale:** Cooldown made the two weapons fire at different rates, and
+the hit was still instant at any point inside range. Travel time makes a
+longer shot arrive later, and a target can die or change team before the
+shot lands. Integer milliunit steps keep the flight deterministic.
+
+**Tradeoff:** The shot homes on the unit it was fired at. It does not
+strike a different unit that crosses its path, and it does not continue
+to a point on the ground if the target dies.

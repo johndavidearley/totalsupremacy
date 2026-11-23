@@ -109,14 +109,24 @@ Movement ticks advance in integer milliunits. One tick is 2,400 milliunits
 and segment samples use that same lattice. Elevation samples and edge costs
 use integer milli-heights. On the local Release build, the 1,800-unit
 far-corner order costs 55,682.465 for A* and Dijkstra and 61,844.747 for the
-flow field. The step median is 0.128 ms with p95 0.131 ms and position
+flow field. Skipping segment samples that miss every obstacle left that
+flow cost unchanged. On one later local Release run the same order measured
+15.138 ms median, against 49.060 ms with every segment sampled. The published
+25.600 ms median remains the table figure. The step median is 0.128 ms with p95 0.131 ms and position
 checksum 3353087934. The simulation records a caller-facing command log and
 an FNV-1a 64-bit hash of authoritative gameplay. Replaying that log
 reproduces the hash. `findReplayDivergence` compares two logs on fresh
-simulations and stops at the first command or hash disagreement. One
-infantry attack deals 10 damage per tick inside 40 world units to another
-team, after movement, and a unit at 0 health stays in the vector. The state
-hash format is version 2. Multiplayer is not implemented.
+simulations and stops at the first command or hash disagreement. Infantry has a 40-unit range and 10 damage. A ranger has a 70-unit range,
+6 damage, and 70 health. Both move at 2,400 milliunits per tick. An attack
+paths to an enemy beyond that unit's own range and stops on entering it.
+Infantry reloads in 10 ticks and a ranger in 20. The timer counts down
+while the unit is alive, and a ready weapon launches a shot after movement.
+The shot moves 8 world units per tick and deals its damage on arrival. A
+later immediate move or attack clears the attack and the order queue, and
+leaves a shot already in flight. An
+appended order starts when the active move finishes or its attack target is
+gone. A unit at 0 health stays in the vector. The state hash format is
+version 6. Multiplayer is not implemented.
 
 ## Next steps
 

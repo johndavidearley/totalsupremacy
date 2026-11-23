@@ -69,7 +69,7 @@ def create_server(session: GameSession) -> FastMCP:
         offset: Annotated[int, Field(ge=0)] = 0,
         limit: Annotated[int, Field(ge=1, le=128)] = 64,
     ) -> dict[str, Any]:
-        """Read a page of units with positions, health, team, path counts, and selection."""
+        """Read a page of units with positions, health, team, archetype, and selection."""
         return await session.request(f"units {offset} {limit}")
 
     @server.tool(annotations=local_action)
@@ -112,11 +112,34 @@ def create_server(session: GameSession) -> FastMCP:
         return await session.request(f"set_team {unit_id} {team}")
 
     @server.tool(annotations=local_action)
+    async def set_archetype(
+        unit_id: Annotated[int, Field(ge=1, le=UINT32_MAX)],
+        archetype: Annotated[int, Field(ge=0, le=1)],
+    ) -> dict[str, Any]:
+        """Set a unit's archetype. 0 is infantry and 1 is ranger."""
+        return await session.request(f"set_archetype {unit_id} {archetype}")
+
+    @server.tool(annotations=local_action)
     async def attack_selected(
         target_id: Annotated[int, Field(ge=0, le=UINT32_MAX)] = 0,
     ) -> dict[str, Any]:
         """Order selected units to attack a unit. A target of 0 clears the order."""
         return await session.request(f"attack {target_id}")
+
+    @server.tool(annotations=local_action)
+    async def queue_move(
+        x: Annotated[float, Field(ge=0, le=MAP_WIDTH, allow_inf_nan=False)],
+        z: Annotated[float, Field(ge=0, le=MAP_HEIGHT, allow_inf_nan=False)],
+    ) -> dict[str, Any]:
+        """Queue a move behind the current order. An idle unit starts it now."""
+        return await session.request(f"queue_move {x:.7g} {z:.7g}")
+
+    @server.tool(annotations=local_action)
+    async def queue_attack(
+        target_id: Annotated[int, Field(ge=0, le=UINT32_MAX)] = 0,
+    ) -> dict[str, Any]:
+        """Queue an attack behind the current order. An idle unit starts it now."""
+        return await session.request(f"queue_attack {target_id}")
 
     @server.tool(annotations=local_action)
     async def set_paused(paused: bool) -> dict[str, Any]:
