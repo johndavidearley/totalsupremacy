@@ -214,7 +214,19 @@ public:
     static constexpr int kTerrainRows =
         static_cast<int>(kMapHeight / kTerrainCellSize);
 
-    explicit Simulation(std::size_t unitCount = 1000);
+    enum class Battlefield { Sandbox, RidgeSkirmish, HoldThePass };
+    enum class ObjectiveStatus { Active, Victory, Defeat };
+    static constexpr Vec2 kPassCenter{560.0F, 650.0F};
+    static constexpr int kPassRadius = 42;
+    static constexpr int kPassHoldTicks = 150;
+    static constexpr int kPassDeadline = 480;
+    static constexpr int kCounterattackTick = 75;
+    explicit Simulation(std::size_t unitCount = 1000,
+                        Battlefield battlefield = Battlefield::Sandbox);
+    Battlefield battlefield() const noexcept { return battlefield_; }
+    int holdTicks() const noexcept { return holdTicks_; }
+    ObjectiveStatus objectiveStatus() const noexcept { return objectiveStatus_; }
+    void restartBattlefield();
 
     // Round half away from zero. Map positions round-trip through these
     // conversions for every milliunit in the battlefield.
@@ -268,7 +280,7 @@ public:
     }
     // FNV-1a 64 of authoritative gameplay. The command log is not an input.
     std::uint64_t stateHash() const noexcept;
-    // Applies commands to a fresh simulation of the same unit count by
+    // Applies commands to a fresh simulation of the same size and battlefield by
     // calling the public methods, so the target records an equal log.
     static void replay(Simulation& simulation,
                        const std::vector<SimulationCommand>& commands);
@@ -277,10 +289,15 @@ public:
     static ReplayDivergence findReplayDivergence(
         std::size_t unitCount,
         const std::vector<SimulationCommand>& left,
-        const std::vector<SimulationCommand>& right);
+        const std::vector<SimulationCommand>& right,
+        Battlefield battlefield = Battlefield::Sandbox);
     std::size_t selectedCount() const noexcept;
 
 private:
+    Battlefield battlefield_;
+    int holdTicks_ = 0;
+    ObjectiveStatus objectiveStatus_ = ObjectiveStatus::Active;
+    void updatePassObjective();
     void clearSelectedFlags() noexcept;
     Unit* findUnit(std::uint32_t id) noexcept;
     bool withinAttackRange(const Unit& attacker, Vec2 target) const noexcept;

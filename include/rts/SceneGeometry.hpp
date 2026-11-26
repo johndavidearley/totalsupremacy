@@ -25,5 +25,7 @@ struct SceneVertex {
 std::vector<SceneVertex> buildSceneGeometry(const Simulation& simulation);
 std::vector<SceneVertex> buildSelectionOverlayGeometry(
     const ScreenRectangle& rectangle);
+void appendPassObjectiveOverlay(std::vector<SceneVertex>& vertices,
+                                const Simulation& simulation, float width);
 
 } // namespace rts

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <unordered_set>
 #include <vector>
 
 namespace rts {
@@ -173,6 +174,12 @@ std::vector<SceneVertex> buildSceneGeometry(const Simulation& simulation) {
     const Color unitColor{0.3F, 0.66F, 0.83F};
     const Color selectedColor{1.0F, 0.76F, 0.23F};
     const Color orderColor{0.9F, 0.84F, 0.49F};
+    std::unordered_set<std::uint32_t> attackTargets;
+    for (const auto& unit : simulation.units()) {
+        if (unit.selected && unit.attackTarget != 0) {
+            attackTargets.insert(unit.attackTarget);
+        }
+    }
     for (const auto& unit : simulation.units()) {
         if (!unit.alive) {
             continue;
@@ -183,6 +190,10 @@ std::vector<SceneVertex> buildSceneGeometry(const Simulation& simulation) {
         const Color body = unit.team == 1 ? Color{0.80F, 0.32F, 0.28F}
             : unit.team == 0 ? unitColor
                              : Color{0.55F, 0.45F, 0.75F};
+        if (attackTargets.contains(unit.id)) {
+            addRing(vertices, unit.position, 13.0F, 2.2F, ground + 0.5F,
+                    {1.0F, 0.26F, 0.16F});
+        }
         if (unit.selected) {
             Vec2 routeStart = unit.position;
             for (std::size_t waypoint = unit.nextWaypoint;
@@ -227,7 +238,52 @@ std::vector<SceneVertex> buildSceneGeometry(const Simulation& simulation) {
                 simulation.terrainElevation(feedback.requestedDestination) + 0.45F,
                 {0.24F, 0.95F, 0.96F});
     }
+    if (simulation.battlefield() == Simulation::Battlefield::HoldThePass) {
+        constexpr auto center = Simulation::kPassCenter;
+        constexpr int segments = 48;
+        const auto point = [center](int index) {
+            constexpr float turn = 6.28318530718F;
+            const float angle = turn * static_cast<float>(index) / segments;
+            return Vec2{center.x + Simulation::kPassRadius * std::cos(angle),
+                        center.y + Simulation::kPassRadius * std::sin(angle)};
+        };
+        for (int index = 0; index < segments; ++index) {
+            addTerrainLine(vertices, simulation, point(index), point(index + 1),
+                           2.0F, {1.0F, 0.78F, 0.27F});
+        }
+    }
     return vertices;
+}
+
+void appendPassObjectiveOverlay(std::vector<SceneVertex>& vertices,
+                                const Simulation& simulation, float width) {
+    if (simulation.battlefield() != Simulation::Battlefield::HoldThePass) {
+        return;
+    }
+    const float span = std::min(300.0F, width * 0.7F);
+    const float left = (width - span) * 0.5F;
+    const auto bar = [&](float top, float height, float fraction, Color color) {
+        if (fraction <= 0.0F) {
+            return;
+        }
+        const float right = left + span * fraction;
+        addQuad(vertices, {left, top, 0.0F}, {right, top, 0.0F},
+                {right, top + height, 0.0F}, {left, top + height, 0.0F}, color);
+    };
+    const auto status = simulation.objectiveStatus();
+    const Color background{0.16F, 0.19F, 0.23F};
+    bar(18.0F, 12.0F, 1.0F, background);
+    if (status == Simulation::ObjectiveStatus::Defeat) {
+        bar(18.0F, 12.0F, 1.0F, {0.80F, 0.25F, 0.20F});
+        return;
+    }
+    bar(18.0F, 12.0F, static_cast<float>(simulation.holdTicks()) / Simulation::kPassHoldTicks,
+        {0.24F, 0.77F, 0.95F});
+    if (status == Simulation::ObjectiveStatus::Active) {
+        bar(34.0F, 4.0F, 1.0F, background);
+        bar(34.0F, 4.0F, 1.0F - static_cast<float>(simulation.tickCount()) /
+            Simulation::kPassDeadline, {1.0F, 0.78F, 0.27F});
+    }
 }
 
 std::vector<SceneVertex> buildSelectionOverlayGeometry(

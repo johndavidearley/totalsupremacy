@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 project(TotalSupremacy VERSION 0.1.0 LANGUAGES CXX)
 
+if(WIN32)
+  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    message(FATAL_ERROR "The Windows build requires MSVC. Configure with the windows-msvc preset.")
+  endif()
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -26,10 +33,26 @@ else()
 endif()
 
 find_package(Vulkan REQUIRED)
-find_package(glfw3 CONFIG REQUIRED)
-if(APPLE)
+if(WIN32)
+  include(FetchContent)
+  if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+  endif()
+  set(GLFW_LIBRARY_TYPE STATIC)
+  set(GLFW_BUILD_DOCS OFF)
+  set(GLFW_INSTALL OFF)
+  set(USE_MSVC_RUNTIME_LIBRARY_DLL OFF)
+  FetchContent_Declare(glfw
+    URL https://codeload.github.com/glfw/glfw/tar.gz/refs/tags/3.4
+    URL_HASH SHA256=c038d34200234d071fae9345bc455e4a8f2f544ab60150765d7704e08f3dac01
+  )
+  FetchContent_MakeAvailable(glfw)
+  find_program(TOTALSUPREMACY_GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
+elseif(APPLE)
+  find_package(glfw3 CONFIG REQUIRED)
   find_program(TOTALSUPREMACY_GLSLC glslc HINTS /opt/local/bin REQUIRED)
 else()
+  find_package(glfw3 CONFIG REQUIRED)
   find_program(TOTALSUPREMACY_GLSLC glslc REQUIRED)
 endif()
 
@@ -152,6 +175,19 @@ if(BUILD_TESTING)
               $<TARGET_FILE:TotalSupremacy>
     )
     set_tests_properties(mcp_control_tests PROPERTIES TIMEOUT 20)
+    foreach(scenario ridge_skirmish hold_the_pass_win hold_the_pass_loss)
+      add_test(NAME ${scenario}_replay
+        COMMAND ${Python3_EXECUTABLE} -m totalsupremacy_mcp.scenarios
+                ${CMAKE_SOURCE_DIR}/tools/mcp/examples/${scenario}.json
+                --executable $<TARGET_FILE:TotalSupremacy>
+                --artifacts ${CMAKE_CURRENT_BINARY_DIR}/playtest-artifacts/${scenario}
+                --repeats 2
+      )
+      set_tests_properties(${scenario}_replay PROPERTIES
+        TIMEOUT 30
+        ENVIRONMENT "PYTHONPATH=${CMAKE_SOURCE_DIR}/tools/mcp/src"
+      )
+    endforeach()
     execute_process(
       COMMAND ${Python3_EXECUTABLE} -c "import mcp"
       RESULT_VARIABLE TOTALSUPREMACY_MCP_SDK_AVAILABLE
@@ -163,10 +199,7 @@ if(BUILD_TESTING)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/mcp/tests/test_mcp_server.py
                 $<TARGET_FILE:TotalSupremacy>
       )
-      set_tests_properties(mcp_server_tests PROPERTIES
-        TIMEOUT 30
-        ENVIRONMENT "PYTHONPATH=${CMAKE_SOURCE_DIR}/tools/mcp/src"
-      )
+      set_tests_properties(mcp_server_tests PROPERTIES TIMEOUT 30)
     endif()
   endif()
 endif()

@@ -6,8 +6,9 @@ import argparse
 import hashlib
 import json
 import math
-import select
+import queue
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -21,11 +22,15 @@ class PlaytestError(RuntimeError):
 _OPERATORS = {"eq", "count", "lt", "le", "gt", "ge"}
 _COMMANDS = {
     "state",
+    "restart",
     "units",
     "select",
     "select_units",
     "clear_selection",
     "move",
+    "attack",
+    "queue_move",
+    "queue_attack",
     "pause",
     "advance",
     "camera",
@@ -70,6 +75,12 @@ def _load_scenario(path: Path) -> dict:
     scenario = json.loads(path.read_text(encoding="utf-8"))
     if scenario.get("version") != 1 or not isinstance(scenario.get("steps"), list):
         raise PlaytestError("Expected a version 1 scenario with a steps list")
+    if type(scenario.get("skirmish", False)) is not bool:
+        raise PlaytestError("Scenario skirmish flag must be a boolean")
+    if type(scenario.get("hold_the_pass", False)) is not bool:
+        raise PlaytestError("Scenario hold_the_pass flag must be a boolean")
+    if scenario.get("skirmish") and scenario.get("hold_the_pass"):
+        raise PlaytestError("Choose one battlefield per scenario")
     if len(scenario["steps"]) > 10000:
         raise PlaytestError("Scenario has more than 10000 steps")
     for step in scenario["steps"]:
@@ -107,8 +118,8 @@ def _unit_ids(args: dict) -> list[int]:
 def _command_line(step: dict) -> list[str]:
     command = step["command"]
     args = step.get("args") or {}
-    if command == "state":
-        return ["state"]
+    if command in {"state", "restart"}:
+        return [command]
     if command == "units":
         return [f"units {int(args.get('offset', 0))} {int(args.get('limit', 64))}"]
     if command == "select":
@@ -171,7 +182,7 @@ def _batches(total: int, size: int) -> list[int]:
 
 
 class GameRun:
-    def __init__(self, executable: Path, artifacts: Path, scenario: Path, timeout: float):
+    def __init__(self, executable: Path, artifacts: Path, timeout: float):
         self.executable = executable
         self.timeout = timeout
         stamp = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
@@ -179,13 +190,19 @@ class GameRun:
         self.process: subprocess.Popen[str] | None = None
         self.log_file = None
         self.last_result: dict[str, Any] = {}
+        self.responses: queue.Queue[str | None] = queue.Queue()
+        self.reader: threading.Thread | None = None
 
-    def launch(self, *, headless: bool) -> None:
+    def launch(self, *, headless: bool, skirmish: bool, hold_the_pass: bool) -> None:
         self.run_dir.mkdir(parents=True)
         self.log_file = (self.run_dir / "game.log").open("w", encoding="utf-8")
         arguments = [str(self.executable), "--mcp-control"]
         if headless:
             arguments.append("--headless")
+        if skirmish:
+            arguments.append("--skirmish")
+        if hold_the_pass:
+            arguments.append("--hold-the-pass")
         self.process = subprocess.Popen(
             arguments,
             stdin=subprocess.PIPE,
@@ -194,12 +211,26 @@ class GameRun:
             text=True,
             cwd=self.run_dir,
         )
+        stdout = self.process.stdout
+        assert stdout is not None
+
+        def read_responses() -> None:
+            try:
+                for line in stdout:
+                    self.responses.put(line)
+            finally:
+                self.responses.put(None)
+
+        self.reader = threading.Thread(target=read_responses, daemon=True)
+        self.reader.start()
         (self.run_dir / "run.json").write_text(
             json.dumps(
                 {
                     "version": 1,
                     "executable": str(self.executable),
                     "headless": headless,
+                    "skirmish": skirmish,
+                    "hold_the_pass": hold_the_pass,
                     "pid": self.process.pid,
                 },
                 indent=2,
@@ -217,10 +248,10 @@ class GameRun:
             raise PlaytestError("No usable game session; see game.log")
         process.stdin.write(line + "\n")
         process.stdin.flush()
-        ready, _, _ = select.select([process.stdout], [], [], self.timeout)
-        if not ready:
-            raise PlaytestError(f"Timed out waiting for a response to {line.split()[0]}")
-        raw = process.stdout.readline()
+        try:
+            raw = self.responses.get(timeout=self.timeout)
+        except queue.Empty as error:
+            raise PlaytestError(f"Timed out waiting for a response to {line.split()[0]}") from error
         if not raw:
             raise PlaytestError("Game exited without responding; see game.log")
         try:
@@ -314,6 +345,13 @@ class GameRun:
             except Exception:
                 process.kill()
                 process.wait(timeout=5)
+        if self.reader is not None:
+            self.reader.join(timeout=5)
+        if process is not None:
+            if process.stdin is not None:
+                process.stdin.close()
+            if process.stdout is not None:
+                process.stdout.close()
         if self.log_file is not None:
             self.log_file.close()
             self.log_file = None
@@ -326,10 +364,11 @@ def replay(executable: Path, scenario_path: Path, artifacts: Path, repeats: int,
     artifacts.mkdir(parents=True, exist_ok=True)
     reports = []
     for _ in range(repeats):
-        run = GameRun(executable, artifacts, scenario_path, timeout)
+        run = GameRun(executable, artifacts, timeout)
         report: dict[str, Any] = {"passed": False, "steps": 0}
         try:
-            run.launch(headless=headless)
+            run.launch(headless=headless, skirmish=scenario.get("skirmish", False),
+                       hold_the_pass=scenario.get("hold_the_pass", False))
             report["run_directory"] = str(run.run_dir)
             (run.run_dir / "scenario.json").write_text(scenario_path.read_text(encoding="utf-8"), encoding="utf-8")
             for index, step in enumerate(scenario["steps"]):

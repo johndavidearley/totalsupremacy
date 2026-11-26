@@ -44,6 +44,8 @@ struct InputState {
 struct Options {
     bool mcpControl = false;
     bool headless = false;
+    bool skirmish = false;
+    bool holdThePass = false;
 };
 
 struct Profile {
@@ -71,14 +73,22 @@ bool parseOptions(int argc, char** argv, Options& options) {
             options.mcpControl = true;
         } else if (argument == "--headless") {
             options.headless = true;
+        } else if (argument == "--skirmish") {
+            options.skirmish = true;
+        } else if (argument == "--hold-the-pass") {
+            options.holdThePass = true;
         } else {
             std::cerr << "Unknown argument: " << argument << '\n'
-                      << "Usage: TotalSupremacy [--mcp-control [--headless]]\n";
+                      << "Usage: TotalSupremacy [--skirmish | --hold-the-pass] [--mcp-control [--headless]]\n";
             return false;
         }
     }
     if (options.headless && !options.mcpControl) {
         std::cerr << "--headless requires --mcp-control\n";
+        return false;
+    }
+    if (options.skirmish && options.holdThePass) {
+        std::cerr << "Choose one scenario.\n";
         return false;
     }
     return true;
@@ -90,6 +100,44 @@ void updateTitle(GLFWwindow* window, const rts::Simulation& simulation,
                  const Profile& gpuProfile, std::size_t sceneVertexCount,
                  double framesPerSecond, bool paused,
                  const rts::Camera3D& camera) {
+    if (simulation.battlefield() == rts::Simulation::Battlefield::HoldThePass) {
+        using Simulation = rts::Simulation;
+        const auto status = simulation.objectiveStatus();
+        std::string title = "Hold the Pass | ";
+        if (status == Simulation::ObjectiveStatus::Active) {
+            const auto remainingTicks = Simulation::kPassDeadline - simulation.tickCount();
+            const int holdTenths = simulation.holdTicks() / 3;
+            title += "Hold the marked pass with blue infantry | " +
+                std::to_string(holdTenths / 10) + "." + std::to_string(holdTenths % 10) +
+                " / 5 s | " + std::to_string((remainingTicks + 29) / 30) + " s left";
+        } else {
+            title += status == Simulation::ObjectiveStatus::Victory ? "Victory" : "Defeat";
+        }
+        title += " | R to restart";
+        if (paused) {
+            title += " | Paused";
+        }
+        glfwSetWindowTitle(window, title.c_str());
+        return;
+    }
+    if (simulation.battlefield() == rts::Simulation::Battlefield::RidgeSkirmish) {
+        const auto living = [&simulation](int team) {
+            return std::count_if(simulation.units().begin(), simulation.units().end(),
+                [team](const rts::Unit& unit) { return unit.alive && unit.team == team; });
+        };
+        const auto blue = living(0);
+        const auto red = living(1);
+        const char* objective = "Eliminate the red defenders";
+        if (blue == 0 || red == 0) {
+            objective = !simulation.projectiles().empty() ? "Battle resolving"
+                : blue == 0 && red == 0 ? "Draw" : blue == 0 ? "Defeat" : "Victory";
+        }
+        const std::string title = std::string("Ridge Skirmish | ") + objective +
+            " | Blue " + std::to_string(blue) + " | Red " + std::to_string(red) +
+            (paused ? " | Paused" : "");
+        glfwSetWindowTitle(window, title.c_str());
+        return;
+    }
     const auto average = [](const Profile& sampleProfile) {
         return sampleProfile.samples == 0
             ? 0.0
@@ -152,20 +200,37 @@ void scrollCallback(GLFWwindow* window, double, double y) {
     }
 }
 
-void issueMoveAtScreen(rts::Simulation& simulation, const rts::Camera3D& camera,
-                       float x, float y) {
+void issueOrderAtScreen(rts::Simulation& simulation, const rts::Camera3D& camera,
+                        float x, float y, bool append) {
+    if (simulation.selectedCount() == 0) {
+        return;
+    }
+    if (const auto* unit = rts::unitAtScreen(simulation, camera, x, y)) {
+        if (std::any_of(simulation.units().begin(), simulation.units().end(),
+                [unit](const rts::Unit& selected) {
+                    return selected.selected && selected.team != unit->team;
+                })) {
+            simulation.attackSelected(unit->id, append);
+            return;
+        }
+    }
     const auto target = camera.ground(x, y,
         [&simulation](float worldX, float worldZ) {
             return simulation.terrainElevation({worldX, worldZ});
         });
     if (target.valid && target.x >= 0.0F && target.x <= rts::Simulation::kMapWidth &&
         target.z >= 0.0F && target.z <= rts::Simulation::kMapHeight) {
-        simulation.moveSelected({target.x, target.z});
+        simulation.moveSelected({target.x, target.z}, rts::PathfindingAlgorithm::FlowField,
+                                append);
     }
 }
 
-void resetCamera(rts::Camera3D& camera) {
+void resetCamera(rts::Camera3D& camera, bool skirmish) {
     camera.perspective = false;
+    if (skirmish) {
+        camera.setPose(0.0F, 60.0F, 2.5F, 560.0F, 650.0F);
+        return;
+    }
     camera.setPose(45.0F, 35.0F, 0.62F, rts::Simulation::kMapWidth * 0.5F,
                    rts::Simulation::kMapHeight * 0.5F);
 }
@@ -207,16 +272,21 @@ int run(const Options& options) {
         renderer = std::make_unique<rts::Renderer3D>(desktop.window);
     }
 
-    rts::Simulation simulation(1000);
+    using Battlefield = rts::Simulation::Battlefield;
+    const auto battlefield = options.holdThePass ? Battlefield::HoldThePass
+        : options.skirmish ? Battlefield::RidgeSkirmish : Battlefield::Sandbox;
+    rts::Simulation simulation(1000, battlefield);
+    const bool scenario = battlefield != Battlefield::Sandbox;
+    const int selectableTeam = scenario ? 0 : -1;
     rts::Camera3D camera;
     camera.setViewport(1440.0F, 900.0F);
-    resetCamera(camera);
+    resetCamera(camera, scenario);
     if (renderer != nullptr) {
         int width = 0;
         int height = 0;
         if (renderer->drawableSize(width, height)) {
             camera.setViewport(static_cast<float>(width), static_cast<float>(height));
-            resetCamera(camera);
+            resetCamera(camera, scenario);
         }
     }
 
@@ -250,6 +320,7 @@ int run(const Options& options) {
     int previousSpace = GLFW_RELEASE;
     int previousT = GLFW_RELEASE;
     int previousHome = GLFW_RELEASE;
+    int previousRestart = GLFW_RELEASE;
     int previousEscape = GLFW_RELEASE;
     int previousLeftButton = GLFW_RELEASE;
     int previousRightButton = GLFW_RELEASE;
@@ -301,7 +372,17 @@ int run(const Options& options) {
                 camera.perspective = !camera.perspective;
             }
             if (keyPressed(GLFW_KEY_HOME, previousHome)) {
-                resetCamera(camera);
+                resetCamera(camera, scenario);
+            }
+            if (scenario && keyPressed(GLFW_KEY_R, previousRestart)) {
+                simulation.restartBattlefield();
+                resetCamera(camera, scenario);
+                leftButtonDown = false;
+                rightButtonDown = false;
+                middleButtonDown = false;
+                selectionDragged = false;
+                paused = options.mcpControl;
+                accumulator = 0.0;
             }
 
             int width = 0;
@@ -351,7 +432,7 @@ int run(const Options& options) {
                     selectionDragged = false;
                     selectionStartX = x;
                     selectionStartY = y;
-                    rts::selectAtScreen(simulation, camera, x, y);
+                    rts::selectAtScreen(simulation, camera, x, y, selectableTeam);
                 }
                 if (rightPressed) {
                     rightButtonDown = true;
@@ -393,14 +474,18 @@ int run(const Options& options) {
                     if (selectionDragged) {
                         rts::selectInScreenRectangle(
                             simulation, camera,
-                            {selectionStartX, selectionStartY}, {x, y});
+                            {selectionStartX, selectionStartY}, {x, y}, selectableTeam);
                     }
                     leftButtonDown = false;
                     selectionDragged = false;
                 }
                 if (rightReleased && rightButtonDown) {
                     if (!rightButtonDragged) {
-                        issueMoveAtScreen(simulation, camera, x, y);
+                        const bool append = glfwGetKey(desktop.window, GLFW_KEY_LEFT_SHIFT) ==
+                                                GLFW_PRESS ||
+                                            glfwGetKey(desktop.window, GLFW_KEY_RIGHT_SHIFT) ==
+                                                GLFW_PRESS;
+                        issueOrderAtScreen(simulation, camera, x, y, append);
                     }
                     rightButtonDown = false;
                     rightButtonDragged = false;

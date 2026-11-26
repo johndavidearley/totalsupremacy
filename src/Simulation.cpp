@@ -264,7 +264,16 @@ void applyCommand(Simulation& simulation, const SimulationCommand& command) {
 
 } // namespace
 
-Simulation::Simulation(std::size_t unitCount) {
+Simulation::Simulation(std::size_t unitCount, Battlefield battlefield)
+    : battlefield_(battlefield) {
+    constexpr std::array<Vec2, 6> ridgePositions{{
+        {534.0F, 580.0F}, {586.0F, 580.0F},
+        {540.0F, 550.0F}, {580.0F, 550.0F},
+        {548.0F, 720.0F}, {575.0F, 745.0F}
+    }};
+    if (battlefield_ != Battlefield::Sandbox) {
+        unitCount = ridgePositions.size();
+    }
     units_.reserve(unitCount);
     terrainObstacles_.reserve(26);
     for (int row = 0; row < 14; ++row) {
@@ -360,6 +369,9 @@ Simulation::Simulation(std::size_t unitCount) {
             380.0F + static_cast<float>(column) * spacing,
             250.0F + static_cast<float>(row) * spacing
         };
+        if (battlefield_ != Battlefield::Sandbox) {
+            position = ridgePositions[i];
+        }
         if (blockedByTerrain(position)) {
             bool relocated = false;
             for (float radius = 4.0F; radius <= 200.0F && !relocated; radius += 4.0F) {
@@ -391,6 +403,13 @@ Simulation::Simulation(std::size_t unitCount) {
         unit.position = position;
         unit.destination = position;
         unit.health = kUnitHealth;
+        if (battlefield_ != Battlefield::Sandbox) {
+            unit.team = i >= 4 ? 1 : 0;
+            if (i == 2 || i == 3 || i == 5) {
+                unit.archetype = UnitArchetype::Ranger;
+                unit.health = archetypeHealth(unit.archetype);
+            }
+        }
         units_.push_back(std::move(unit));
     }
 }
@@ -424,7 +443,57 @@ float Simulation::terrainElevation(Vec2 position) const noexcept {
     return elevationFromMilliunits(terrainElevationMilliunits(position));
 }
 
+void Simulation::restartBattlefield() {
+    *this = Simulation(units_.size(), battlefield_);
+}
+
+void Simulation::updatePassObjective() {
+    if (objectiveStatus_ != ObjectiveStatus::Active) {
+        return;
+    }
+    bool blueAlive = false;
+    bool infantryInPass = false;
+    bool redInPass = false;
+    for (const auto& unit : units_) {
+        if (!unit.alive) {
+            continue;
+        }
+        const std::int64_t dx = worldMilliunits(unit.position.x) - worldMilliunits(kPassCenter.x);
+        const std::int64_t dz = worldMilliunits(unit.position.y) - worldMilliunits(kPassCenter.y);
+        constexpr std::int64_t radius = kPassRadius * 1000;
+        const bool inPass = dx * dx + dz * dz <= radius * radius;
+        if (unit.team == 0) {
+            blueAlive = true;
+            infantryInPass |= inPass && unit.archetype == UnitArchetype::Infantry;
+        } else if (unit.team == 1) {
+            redInPass |= inPass;
+        }
+    }
+    holdTicks_ = infantryInPass && !redInPass ? holdTicks_ + 1 : 0;
+    if (holdTicks_ == kPassHoldTicks) {
+        objectiveStatus_ = ObjectiveStatus::Victory;
+    } else if (!blueAlive || tickCount_ >= kPassDeadline) {
+        objectiveStatus_ = ObjectiveStatus::Defeat;
+    }
+}
+
 void Simulation::step() {
+    const bool counterattack = battlefield_ == Battlefield::HoldThePass &&
+        objectiveStatus_ == ObjectiveStatus::Active && tickCount_ >= kCounterattackTick;
+    if (battlefield_ != Battlefield::Sandbox) {
+        for (auto& defender : units_) {
+            if (!defender.alive || defender.team != 1 || orderInProgress(defender)) {
+                continue;
+            }
+            for (const auto& opponent : units_) {
+                if (opponent.alive && opponent.team == 0 &&
+                    (counterattack || withinAttackRange(defender, opponent.position))) {
+                    defender.attackTarget = opponent.id;
+                    break;
+                }
+            }
+        }
+    }
     for (auto& unit : units_) {
         refreshChase(unit);
     }
@@ -482,6 +551,9 @@ void Simulation::step() {
     resolveAttacks();
     advanceOrders();
     ++tickCount_;
+    if (battlefield_ == Battlefield::HoldThePass) {
+        updatePassObjective();
+    }
     commandLog_.push_back(makeCommand(SimulationCommandKind::Step));
 }
 
@@ -698,15 +770,14 @@ std::size_t Simulation::attackSelected(std::uint32_t targetId, bool append) {
         if (!unit.selected || !unit.alive) {
             continue;
         }
+        UnitOrder order;
+        order.kind = UnitOrderKind::Attack;
+        order.targetId = targetId;
         if (append && (orderInProgress(unit) || !unit.orders.empty())) {
-            UnitOrder order;
-            order.kind = UnitOrderKind::Attack;
-            order.targetId = targetId;
             unit.orders.push_back(order);
         } else {
             unit.orders.clear();
-            unit.attackTarget = targetId;
-            refreshChase(unit);
+            beginOrder(unit, order);
         }
         ++count;
     }
@@ -729,6 +800,7 @@ void Simulation::beginOrder(Unit& unit, const UnitOrder& order) {
     unit.nextWaypoint = 0;
     if (order.kind == UnitOrderKind::Attack) {
         unit.attackTarget = order.targetId;
+        unit.destination = unit.position;
         refreshChase(unit);
         return;
     }
@@ -1016,7 +1088,9 @@ std::uint64_t Simulation::stateHash() const noexcept {
     // each shot in flight (id u32, milliunits i32, target u32, damage i32,
     // team u8), then the last move
     // (valid u8, requested milliunits i32, ordered and routed counts u32,
-    // issue tick u64).
+    // issue tick u64). Version 7 uses the same fields for the ridge skirmish,
+    // whose defenders acquire targets automatically. Version 8 appends
+    // the hold timer (u32) and objective status (u8).
     constexpr std::uint64_t offset = 14695981039346656037ULL;
     constexpr std::uint64_t prime = 1099511628211ULL;
     std::uint64_t hash = offset;
@@ -1026,7 +1100,8 @@ std::uint64_t Simulation::stateHash() const noexcept {
             hash *= prime;
         }
     };
-    mix(6U, 4);
+    mix(battlefield_ == Battlefield::HoldThePass ? 8U
+        : battlefield_ == Battlefield::RidgeSkirmish ? 7U : 6U, 4);
     mix(tickCount_, 8);
     for (const Unit& unit : units_) {
         const auto milli = [](float world) noexcept {
@@ -1077,6 +1152,10 @@ std::uint64_t Simulation::stateHash() const noexcept {
     mix(static_cast<std::uint32_t>(lastMoveCommand_.unitsOrdered), 4);
     mix(static_cast<std::uint32_t>(lastMoveCommand_.unitsRouted), 4);
     mix(lastMoveCommand_.issuedAtTick, 8);
+    if (battlefield_ == Battlefield::HoldThePass) {
+        mix(static_cast<std::uint32_t>(holdTicks_), 4);
+        mix(static_cast<std::uint8_t>(objectiveStatus_), 1);
+    }
     return hash;
 }
 
@@ -1090,9 +1169,9 @@ void Simulation::replay(Simulation& simulation,
 ReplayDivergence Simulation::findReplayDivergence(
     std::size_t unitCount,
     const std::vector<SimulationCommand>& leftLog,
-    const std::vector<SimulationCommand>& rightLog) {
-    Simulation left(unitCount);
-    Simulation right(unitCount);
+    const std::vector<SimulationCommand>& rightLog, Battlefield battlefield) {
+    Simulation left(unitCount, battlefield);
+    Simulation right(unitCount, battlefield);
     ReplayDivergence report;
     report.leftHash = left.stateHash();
     report.rightHash = right.stateHash();

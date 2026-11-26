@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "skirmish": true,
+  "require_idle": true,
+  "steps": [
+    {"assert": {"field": "unit_count", "op": "eq", "expected": 6}},
+    {"assert": {"section": "units", "field": "units.2.archetype", "op": "eq", "expected": 1}},
+    {"assert": {"section": "units", "field": "units.4.team", "op": "eq", "expected": 1}},
+    {"command": "select_units", "args": {"ids": [1, 2, 3, 4]}},
+    {"command": "attack", "args": {"target": 5}},
+    {"command": "queue_attack", "args": {"target": 6}},
+    {"assert": {"section": "units", "field": "units.0.order_count", "op": "eq", "expected": 1}},
+    {"command": "advance", "args": {"ticks": 400}},
+    {"assert": {"section": "units", "field": "units.4.alive", "op": "eq", "expected": false}},
+    {"assert": {"section": "units", "field": "units.5.alive", "op": "eq", "expected": false}},
+    {"assert": {"section": "units", "field": "units.0.health", "op": "lt", "expected": 100}},
+    {"assert": {"section": "units", "field": "units.3.alive", "op": "eq", "expected": true}},
+    {"assert": {"field": "projectile_count", "op": "eq", "expected": 0}}
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "hold_the_pass": true,
+  "steps": [
+    {"command": "advance", "args": {"ticks": 100}},
+    {"assert": {"section": "units", "field": "units.4.attack_target", "op": "eq", "expected": 1}},
+    {"command": "restart"},
+    {"assert": {"field": "tick", "op": "eq", "expected": 0}},
+    {"assert": {"field": "objective.status", "op": "eq", "expected": "active"}},
+    {"command": "select_units", "args": {"ids": [3, 4]}},
+    {"command": "move", "args": {"x": 560, "z": 650}},
+    {"command": "advance", "args": {"ticks": 60}},
+    {"assert": {"section": "units", "field": "units.2.z", "op": "gt", "expected": 620}},
+    {"assert": {"field": "objective.hold_ticks", "op": "eq", "expected": 0}},
+    {"command": "advance", "args": {"ticks": 420}},
+    {"assert": {"field": "objective.status", "op": "eq", "expected": "defeat"}},
+    {"assert": {"field": "objective.hold_ticks", "op": "eq", "expected": 0}}
+  ]
+}

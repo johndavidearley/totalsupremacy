@@ -12,6 +12,7 @@ from mcp.client.stdio import stdio_client
 async def run_server_test(game_executable: Path) -> None:
     parameters = StdioServerParameters(
         command=sys.executable,
+        env={"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
         args=[
             "-m",
             "totalsupremacy_mcp.server",

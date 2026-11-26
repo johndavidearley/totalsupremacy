@@ -41,8 +41,15 @@ std::string stateResponse(const Simulation& simulation, const Camera3D& camera,
            << ",\"units_ordered\":" << simulation.lastMoveCommand().unitsOrdered
            << ",\"units_routed\":" << simulation.lastMoveCommand().unitsRouted
            << ",\"issued_at_tick\":" << simulation.lastMoveCommand().issuedAtTick
-           << "}"
-           << ",\"camera\":{\"yaw\":" << camera.yaw
+           << "}";
+    if (simulation.battlefield() == Simulation::Battlefield::HoldThePass) {
+        const auto status = simulation.objectiveStatus();
+        const char* label = status == Simulation::ObjectiveStatus::Victory ? "victory"
+            : status == Simulation::ObjectiveStatus::Defeat ? "defeat" : "active";
+        result << ",\"objective\":{\"status\":\"" << label
+               << "\",\"hold_ticks\":" << simulation.holdTicks() << "}";
+    }
+    result << ",\"camera\":{\"yaw\":" << camera.yaw
            << ",\"pitch\":" << camera.pitch
            << ",\"scale\":" << camera.scale
            << ",\"perspective\":" << (camera.perspective ? "true" : "false")
@@ -89,6 +96,14 @@ std::string ControlBridge::execute(const std::string& request, Simulation& simul
         if (!noExtraArguments(stream)) {
             return error("state takes no arguments");
         }
+        return stateResponse(simulation, camera, paused);
+    }
+    if (command == "restart") {
+        if (!noExtraArguments(stream) ||
+            simulation.battlefield() == Simulation::Battlefield::Sandbox) {
+            return error("restart requires a scenario and takes no arguments");
+        }
+        simulation.restartBattlefield();
         return stateResponse(simulation, camera, paused);
     }
     if (command == "units") {

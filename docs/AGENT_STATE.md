@@ -27,7 +27,7 @@ blocked. A prior flat-terrain headless order routed all 1,000 units in 0.059
 seconds. The live renderer
 created a MoltenVK swapchain on Intel Iris Plus graphics during a 5-second
 smoke test. MCP validation used Python 3.14 and `mcp==1.26.0`. No performance
-target or non-macOS build has been verified.
+target has been verified. Windows verification is recorded below.
 
 A repeatable Release headless benchmark now measures route-command latency and
 per-tick simulation cost at 250 through 1,800 units. Its first local baseline
@@ -126,7 +126,13 @@ later immediate move or attack clears the attack and the order queue, and
 leaves a shot already in flight. An
 appended order starts when the active move finishes or its attack target is
 gone. A unit at 0 health stays in the vector. The state hash format is
-version 6. Multiplayer is not implemented.
+version 6 for the sandbox and version 7 for the ridge skirmish. Multiplayer
+is not implemented.
+
+The Windows x64 Release build uses Visual Studio 2022 MSVC and the Windows
+Vulkan SDK. It links GLFW and the Microsoft C++ runtime statically. All four
+CTest checks pass, including the MCP SDK and two identical skirmish replays.
+The desktop mode is available with `--skirmish`.
 
 ## Next steps
 
@@ -134,4 +140,5 @@ version 6. Multiplayer is not implemented.
    fixed budgets after representative measurements. The local 1,800-unit
    far-corner group order is 25.600 ms median, and the local 1,800-unit
    selected scene build is 6.407 ms median. Neither is a budget.
-2. Build and test on Windows and Linux. Only macOS has been validated.
+2. Run the Ubuntu workflow in GitHub Actions to verify the Linux build and
+   headless tests.

@@ -22,6 +22,24 @@ benchmark claims. Geometry for
 the battlefield is submitted in batched Vulkan draws with depth testing. There
 is no automated timing threshold in the test suite.
 
+### Windows Release baseline
+
+One local MSYS2 UCRT64 Release run with GCC 16.2 used a Ryzen 5 2600 host
+with a GeForce GTX 1660 Ti. The headless simulation benchmark ran five routing
+trials and nine tick trials per case. The Vulkan benchmark measured 180
+frames per case at 1440×900. All times below are in milliseconds.
+
+| Case | Median | p95 |
+| --- | ---: | ---: |
+| 1,800-unit far-corner flow-field order | 13.987 | 14.351 |
+| Simulation tick after the same order | 0.197 | 0.225 |
+| CPU scene build with 1,800 units and 100 selected | 4.961 | 7.361 |
+| GPU render pass for the same scene | 0.529 | 2.536 |
+
+The group order routed all 1,800 units on formation paths with zero individual
+fallbacks. These measurements establish a local comparison point. Fixed
+performance budgets are still pending.
+
 ### Live Vulkan renderer benchmark
 
 Run the visible-window benchmark on a machine with a Vulkan-capable display:

@@ -14,7 +14,9 @@ This is a forward-looking sequence, not a claim that the listed features exist.
   A*/Dijkstra path-cost comparison.
 - [x] Formation-level pathfinding. Group orders share one flow field and keep
   per-unit formation slots. One-unit orders stay on A*.
-- [ ] Build/test verification on Windows and Linux; only macOS validated locally.
+- [x] Verify the Windows Release build, CTest suite, and Vulkan window.
+- [x] Support move, attack, and queued orders in a playable desktop skirmish.
+- [ ] Verify the Linux Release build and headless tests through CI.
 
 ## Phase 2 — Tactical simulation
 
@@ -62,4 +64,4 @@ vector. An appended move or attack waits
 behind the active order; an immediate order clears that queue. Multiplayer
 is not implemented. Next, set performance
 budgets from representative target hardware. The local measurements are not
-yet budgets. Windows and Linux builds are still unvalidated.
+yet budgets. Windows is verified locally, and Linux is pending a CI run.

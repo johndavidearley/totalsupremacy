@@ -531,6 +531,9 @@ void testAttackDamagesEnemyInRange() {
     cancelled.step();
     require(cancelled.units()[farId - 1].health == rts::Simulation::kUnitHealth,
             "a moved unit does not keep chasing");
+    require(cancelled.attackSelected(farId) == 1 &&
+            cancelled.units()[0].destination.y < 300.0F,
+            "an immediate attack replaces a move route with a chase");
 
     rts::Simulation idle(2);
     require(idle.attackSelected(1) == 0 &&
@@ -1002,6 +1005,7 @@ void testBatchedPathBackend() {
 
 void testScreenRectangleSelection() {
     rts::Simulation simulation(4);
+    simulation.setTeam(2, 1);
     rts::Camera3D camera;
     camera.setViewport(1280.0F, 800.0F);
     for (const bool perspective : {false, true}) {
@@ -1018,7 +1022,6 @@ void testScreenRectangleSelection() {
         };
         const auto first = projectedUnit(0);
         const auto second = projectedUnit(1);
-        const auto third = projectedUnit(2);
         const rts::Vec2 firstCorner{first.x - 2.0F, first.y - 2.0F};
         const rts::Vec2 secondCorner{second.x + 2.0F, second.y + 2.0F};
         require(rts::selectInScreenRectangle(simulation, camera,
@@ -1031,6 +1034,12 @@ void testScreenRectangleSelection() {
         require(rts::selectInScreenRectangle(simulation, camera,
                     secondCorner, firstCorner) == 2,
                 "screen rectangle selection works when dragged in reverse");
+        const auto* enemy = rts::unitAtScreen(simulation, camera, second.x, second.y);
+        require(enemy != nullptr && enemy->id == 2 && enemy->team == 1,
+                "screen picking resolves the hostile unit under the cursor");
+        require(rts::selectInScreenRectangle(simulation, camera,
+                    firstCorner, secondCorner, 0) == 1 && simulation.units()[0].selected,
+                "team-restricted rectangle selection excludes the hostile unit");
     }
 }
 

@@ -38,6 +38,7 @@ struct alignas(16) PushConstants {
     float farPlane;
     std::int32_t perspective;
     std::int32_t screenOverlay;
+    std::uint32_t padding;
 };
 
 static_assert(sizeof(PushConstants) == 80);
@@ -1025,6 +1026,7 @@ struct Renderer3D::Impl {
         auto overlay = selectionRectangle == nullptr
             ? std::vector<SceneVertex>{}
             : buildSelectionOverlayGeometry(*selectionRectangle);
+        appendPassObjectiveOverlay(overlay, simulation, static_cast<float>(extent.width));
         const auto sceneBuildEnd = std::chrono::steady_clock::now();
         frameStats.sceneBuildMilliseconds =
             std::chrono::duration<double, std::milli>(

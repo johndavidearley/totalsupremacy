@@ -25,9 +25,34 @@ ctest --test-dir build --output-on-failure
 ./build/TotalSupremacy
 ```
 
-The renderer requires a display and Vulkan-capable driver. On Windows, install
-the Vulkan SDK and GLFW development package. On Linux, install Vulkan headers,
+The renderer requires a display and Vulkan-capable driver. On Linux, install Vulkan headers,
 the loader, shaderc, GLFW, and a Vulkan-capable driver from the distribution.
+
+### Windows Release build
+
+Install Visual Studio 2022 or Build Tools 2022 with the C++ desktop workload,
+Windows SDK, and CMake tools (3.21 or later). Install the Windows Vulkan SDK and open a fresh
+Developer PowerShell. If using a standalone SDK directory, set `VULKAN_SDK`
+to that directory before configuring.
+
+Run from the repository root:
+
+```powershell
+cmake --preset windows-msvc
+cmake --build --preset windows-release --parallel
+ctest --preset windows-release
+.\build\windows-msvc\Release\TotalSupremacy.exe --skirmish
+```
+
+CMake downloads GLFW 3.4 on the first configure. GLFW and the Microsoft C++
+runtime are linked statically. The Vulkan loader comes from the Windows
+graphics driver installation. Double-click the Release executable to open
+the sandbox.
+
+CMake uses Python 3.10 or later for the control and skirmish replay tests.
+Pass `-DPython3_EXECUTABLE=C:/path/to/python.exe` at configure time to select
+an interpreter. Install `tools/mcp` into that environment to include the MCP
+SDK test.
 
 ### GPU pathfinding benchmark on Linux
 
@@ -44,20 +69,14 @@ ctest --test-dir build --output-on-failure
 
 ### GPU pathfinding benchmark on Windows
 
-Install Visual Studio's C++ build tools, CMake, the Vulkan SDK (including
-`glslc` on `PATH`), an appropriate Vulkan GPU driver, and GLFW. For example,
-with vcpkg installed and `VCPKG_ROOT` set in PowerShell:
+After completing the Windows Release build, run:
 
 ```powershell
-& "$env:VCPKG_ROOT/vcpkg.exe" install glfw3:x64-windows
-cmake -S . -B build -A x64 "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=x64-windows"
-cmake --build build --config Release --parallel
-ctest --test-dir build -C Release --output-on-failure
-.\build\Release\totalsupremacy_gpu_benchmark.exe --gpu 1800
+.\build\windows-msvc\Release\totalsupremacy_gpu_benchmark.exe --gpu 1800
 ```
 
-Linux and Windows builds have not yet been validated. The experimental
-benchmark selects the first compatible Vulkan compute device; check its
+Linux validation is pending the first CI run.
+The experimental benchmark selects the first compatible Vulkan compute device. Check its
 `device` output to confirm it used the intended GPU, especially on hybrid
 laptops. It compares each result against CPU A* and exits on a mismatch.
 Details and the existing macOS baseline are in
@@ -77,10 +96,25 @@ an initial playable engineering slice, not a complete RTS.
 
 Controls: WASD or arrows pan; mouse wheel zooms toward the pointer; right-drag
 orbits; middle-drag pans; T toggles perspective; left click selects the nearest
-unit or left-drag selects a rectangle; right click gives selected units a move
-order. Selected units show their routed paths and destinations, and the window
+unit or left-drag selects a rectangle. Right-click a hostile unit to attack or
+the ground to move. Hold Shift while right-clicking to queue either order.
+Selected units show their routed paths and destinations, and active attack
+targets are outlined in red. The window
 title briefly reports how many units were successfully routed; Space
 pauses/resumes; Home resets the camera; Escape exits.
+
+Launch with `--skirmish` to command four blue infantry and rangers against two
+red defenders at the western ridge pass. The defenders engage blue units that
+enter weapon range. Eliminate both red units to win. The window title shows
+survivor counts and the result. CTest runs `ridge_skirmish_replay` twice and
+compares final state hashes.
+
+Launch with `--hold-the-pass` for the objective scenario. Move blue infantry
+into the marked circle and keep red units outside it for five uninterrupted
+seconds. Rangers can cover the infantry while the red force counterattacks.
+You have 16 seconds to complete the objective. The blue bar shows hold progress,
+the gold bar shows time remaining, and the title shows the result. Press **R**
+to restart either scenario. CTest replays both the win and loss twice.
 
 ## MCP control
 

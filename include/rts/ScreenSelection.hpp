@@ -26,15 +26,15 @@ inline bool visibleForSelection(const ProjectedPoint& point,
 
 } // namespace detail
 
-inline void selectAtScreen(Simulation& simulation, const Camera3D& camera,
-                           float x, float y) {
+inline const Unit* unitAtScreen(const Simulation& simulation, const Camera3D& camera,
+                                float x, float y, int team = -1) {
     constexpr float maxScreenDistanceSquared = 18.0F * 18.0F;
     float nearestDistanceSquared = maxScreenDistanceSquared;
     float nearestDepth = std::numeric_limits<float>::max();
     const Unit* nearest = nullptr;
 
     for (const auto& unit : simulation.units()) {
-        if (!unit.alive) {
+        if (!unit.alive || (team >= 0 && unit.team != team)) {
             continue;
         }
         const float unitHeight = simulation.terrainElevation(unit.position) + 8.5F;
@@ -55,7 +55,12 @@ inline void selectAtScreen(Simulation& simulation, const Camera3D& camera,
         }
     }
 
-    if (nearest != nullptr) {
+    return nearest;
+}
+
+inline void selectAtScreen(Simulation& simulation, const Camera3D& camera,
+                           float x, float y, int team = -1) {
+    if (const auto* nearest = unitAtScreen(simulation, camera, x, y, team)) {
         simulation.selectUnit(nearest->id);
     } else {
         simulation.clearSelection();
@@ -64,7 +69,7 @@ inline void selectAtScreen(Simulation& simulation, const Camera3D& camera,
 
 inline std::size_t selectInScreenRectangle(Simulation& simulation,
                                            const Camera3D& camera,
-                                           Vec2 first, Vec2 second) {
+                                           Vec2 first, Vec2 second, int team = -1) {
     const float minimumX = std::min(first.x, second.x);
     const float maximumX = std::max(first.x, second.x);
     const float minimumY = std::min(first.y, second.y);
@@ -72,7 +77,7 @@ inline std::size_t selectInScreenRectangle(Simulation& simulation,
     std::vector<std::uint32_t> selectedIds;
 
     for (const auto& unit : simulation.units()) {
-        if (!unit.alive) {
+        if (!unit.alive || (team >= 0 && unit.team != team)) {
             continue;
         }
         const auto point = camera.project({
